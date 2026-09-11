@@ -11,12 +11,26 @@ def _unread_total(client) -> int:
     return response.data["total"]
 
 
+def _make_mutual(a, b) -> None:
+    """建立互相关注。
+
+    业务规则（2026-09-11 冻结）：私聊要求双方互相关注，否则 403 NOT_MUTUAL_FOLLOW。
+    本文件的用例验证的是"会话/消息本身"的行为，因此先把前置条件补成互关——
+    **只改前置数据，不改任何断言**。幂等：重复关注返回 409 视为该方向已就绪。
+    """
+    for follower, target in ((a, b), (b, a)):
+        target_id = target.get("/api/users/me").data["id"]
+        resp = follower.post(f"/api/users/{target_id}/follow")
+        assert resp.ok or resp.code == 409, resp
+
+
 @pytest.mark.smoke
 @pytest.mark.write
 def test_send_message_creates_conversation(fresh_users):
     sender, receiver = fresh_users(2)
     receiver_id = receiver.get("/api/users/me").data["id"]
 
+    _make_mutual(sender, receiver)
     response = sender.post("/api/messages", json_body={"receiverId": receiver_id, "content": "你好"})
 
     assert response.ok, response.message
@@ -35,6 +49,7 @@ def test_unread_count_increments_for_receiver_only(fresh_users):
     sender, receiver = fresh_users(2)
     receiver_id = receiver.get("/api/users/me").data["id"]
 
+    _make_mutual(sender, receiver)
     before_receiver = _unread_total(receiver)
     before_sender = _unread_total(sender)
 
@@ -49,6 +64,7 @@ def test_mark_conversation_read(fresh_users):
     sender, receiver = fresh_users(2)
     receiver_id = receiver.get("/api/users/me").data["id"]
 
+    _make_mutual(sender, receiver)
     sender.post("/api/messages", json_body={"receiverId": receiver_id, "content": "消息一"})
     sender.post("/api/messages", json_body={"receiverId": receiver_id, "content": "消息二"})
 
@@ -66,6 +82,7 @@ def test_mark_read_does_not_affect_partner(fresh_users):
     sender, receiver = fresh_users(2)
     receiver_id = receiver.get("/api/users/me").data["id"]
 
+    _make_mutual(sender, receiver)
     sender.post("/api/messages", json_body={"receiverId": receiver_id, "content": "单向已读"})
 
     conversation_id = receiver.get("/api/conversations").data["list"][0]["id"]
@@ -86,6 +103,7 @@ def test_conversation_is_symmetric(fresh_users):
     alice_id = alice.get("/api/users/me").data["id"]
     bob_id = bob.get("/api/users/me").data["id"]
 
+    _make_mutual(alice, bob)
     from_alice = alice.post("/api/conversations", json_body={"targetUserId": bob_id})
     from_bob = bob.post("/api/conversations", json_body={"targetUserId": alice_id})
 
@@ -98,6 +116,7 @@ def test_open_conversation_is_idempotent(fresh_users):
     alice, bob = fresh_users(2)
     bob_id = bob.get("/api/users/me").data["id"]
 
+    _make_mutual(alice, bob)
     first = alice.post("/api/conversations", json_body={"targetUserId": bob_id})
     second = alice.post("/api/conversations", json_body={"targetUserId": bob_id})
 
@@ -119,6 +138,7 @@ def test_message_content_boundaries(fresh_users):
     sender, receiver = fresh_users(2)
     receiver_id = receiver.get("/api/users/me").data["id"]
 
+    _make_mutual(sender, receiver)
     too_long = sender.post(
         "/api/messages", json_body={"receiverId": receiver_id, "content": "字" * 1001}
     )
@@ -161,6 +181,7 @@ def test_message_history_is_chronological(fresh_users):
     sender, receiver = fresh_users(2)
     receiver_id = receiver.get("/api/users/me").data["id"]
 
+    _make_mutual(sender, receiver)
     for index in range(5):
         sender.post("/api/messages", json_body={"receiverId": receiver_id, "content": f"第 {index} 条"})
 
@@ -178,6 +199,7 @@ def test_message_cursor_pagination(fresh_users):
     sender, receiver = fresh_users(2)
     receiver_id = receiver.get("/api/users/me").data["id"]
 
+    _make_mutual(sender, receiver)
     for index in range(10):
         sender.post("/api/messages", json_body={"receiverId": receiver_id, "content": f"消息 {index}"})
 
@@ -207,6 +229,8 @@ def test_conversation_list_orders_by_last_message(fresh_users):
     bob_id = bob.get("/api/users/me").data["id"]
     carol_id = carol.get("/api/users/me").data["id"]
 
+    _make_mutual(alice, bob)
+    _make_mutual(alice, carol)
     alice.post("/api/messages", json_body={"receiverId": bob_id, "content": "先给 bob 发"})
     alice.post("/api/messages", json_body={"receiverId": carol_id, "content": "后给 carol 发"})
 
@@ -220,6 +244,7 @@ def test_empty_conversation_is_hidden(fresh_users):
     alice, bob = fresh_users(2)
     bob_id = bob.get("/api/users/me").data["id"]
 
+    _make_mutual(alice, bob)
     alice.post("/api/conversations", json_body={"targetUserId": bob_id})
 
     assert alice.get("/api/conversations").data["total"] == 0
@@ -229,6 +254,7 @@ def test_empty_conversation_is_hidden(fresh_users):
 def test_non_member_cannot_read_messages(fresh_users):
     alice, bob, stranger = fresh_users(3)
     bob_id = bob.get("/api/users/me").data["id"]
+    _make_mutual(alice, bob)
     alice.post("/api/messages", json_body={"receiverId": bob_id, "content": "私密对话"})
 
     conversation_id = alice.get("/api/conversations").data["list"][0]["id"]

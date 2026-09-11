@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { conversationApi, messageApi } from '@/api/message'
+import { userApi } from '@/api/user'
 import { useNotificationStore } from '@/stores/notification'
-import type { Conversation, Message } from '@/api/types'
+import type { Conversation, Message, UserBrief } from '@/api/types'
 import { chatTime, conversationTime } from '@/utils/format'
 import UserAvatar from '@/components/UserAvatar.vue'
 import EmptyState from '@/components/EmptyState.vue'
@@ -25,6 +27,24 @@ const scrollRef = ref<HTMLElement | null>(null)
 
 const activeConversation = computed(() =>
   conversations.value.find((item) => item.id === activeId.value),
+)
+
+/**
+ * 草稿会话的对端。
+ *
+ * 从用户主页点「私信」进来时，这个会话**还没有落库**。
+ * 原因：新会话没有任何消息，而 `GET /api/conversations` 有意不返回空会话
+ * （避免会话列表出现空白条目）。所以"刚创建的会话"根本不在列表里。
+ *
+ * 如果右侧只认列表里的会话，聊天窗口就永远打不开——这正是「无法私聊」的根因。
+ * 这里改为先只记住"想跟谁聊"，等发出第一条消息时由 `POST /api/messages`
+ * 顺带把会话建出来（那个接口本来就支持自动建会话）。
+ */
+const draftPartner = ref<UserBrief | null>(null)
+
+/** 右侧真正渲染的对端：已存在的会话优先，否则是草稿会话。 */
+const displayedPartner = computed(
+  () => activeConversation.value?.partner ?? draftPartner.value,
 )
 
 /** 聊天页轮询要更快：用户正盯着这个页面等回复，3 秒是体感与请求量的折中。 */
@@ -52,6 +72,50 @@ async function selectConversation(id: string) {
   await markRead()
   // 把当前会话同步到地址栏，刷新后仍停留在这里
   router.replace({ name: 'messages', query: { conversation: id } })
+}
+
+/**
+ * 进入草稿会话：先把对端资料拉回来把窗口撑起来，但**不建会话**。
+ * 已经有和这个人的会话时，直接打开已有的，不另起草稿。
+ */
+async function startDraft(partnerId: string) {
+  const existing = conversations.value.find((item) => item.partner.id === partnerId)
+  if (existing) {
+    await selectConversation(existing.id)
+    return
+  }
+
+  try {
+    const profile = await userApi.profile(partnerId)
+    activeId.value = ''
+    messages.value = []
+    hasOlder.value = false
+    draftPartner.value = {
+      id: profile.id,
+      username: profile.username,
+      nickname: profile.nickname,
+      avatar: profile.avatar,
+      bio: profile.bio,
+    }
+  } catch {
+    // 用户不存在或已注销：不进入草稿态，页面回到「选择会话」的空状态
+    draftPartner.value = null
+    ElMessage.warning('无法与该用户私信')
+  }
+}
+
+/**
+ * 草稿会话期间对方先发来消息时，切到真实会话。
+ * 否则消息已经落库、列表里也有了，右侧却还停在空的草稿窗口。
+ */
+async function adoptDraftIfMaterialised() {
+  const partner = draftPartner.value
+  if (!partner) return
+  const existing = conversations.value.find((item) => item.partner.id === partner.id)
+  if (existing) {
+    draftPartner.value = null
+    await selectConversation(existing.id)
+  }
 }
 
 async function loadLatestMessages() {
@@ -88,16 +152,27 @@ async function markRead() {
 
 async function send() {
   const content = draft.value.trim()
-  const conversation = activeConversation.value
-  if (!content || !conversation) return
+  const partner = displayedPartner.value
+  if (!content || !partner) return
   if (sending.value) return
 
   sending.value = true
   try {
-    const created = await messageApi.send(conversation.partner.id, content)
+    // 草稿会话在这一刻才真正落库：POST /api/messages 会自动建会话
+    const created = await messageApi.send(partner.id, content)
     draft.value = ''
+
+    if (!activeConversation.value) {
+      // 从草稿转为真实会话：重拉列表并选中，让左侧同步出现这一条
+      draftPartner.value = null
+      await loadConversations()
+      await selectConversation(created.conversationId)
+      return
+    }
+
     messages.value = [...messages.value, created]
     // 会话列表里的预览与排序也要跟着更新
+    const conversation = activeConversation.value
     conversation.lastMessagePreview = content
     conversation.lastMessageTime = created.createTime
     await scrollToBottom()
@@ -131,7 +206,9 @@ function startChatPolling() {
   stopChatPolling()
   chatTimer = window.setInterval(() => {
     pollNewMessages().catch(() => undefined)
-    loadConversations().catch(() => undefined)
+    loadConversations()
+      .then(adoptDraftIfMaterialised)
+      .catch(() => undefined)
   }, CHAT_POLL_INTERVAL)
 }
 
@@ -150,11 +227,22 @@ function onVisibilityChange() {
 }
 
 watch(
-  () => route.query.conversation,
-  (value) => {
-    const id = value as string | undefined
-    if (id && id !== activeId.value && conversations.value.some((item) => item.id === id)) {
-      selectConversation(id)
+  () => route.query,
+  async () => {
+    const requested = route.query.conversation as string | undefined
+    if (
+      requested &&
+      requested !== activeId.value &&
+      conversations.value.some((item) => item.id === requested)
+    ) {
+      await selectConversation(requested)
+      return
+    }
+
+    // ?to=<userId> 是从用户主页点「私信」进来的入口
+    const target = route.query.to as string | undefined
+    if (target && target !== displayedPartner.value?.id) {
+      await startDraft(target)
     }
   },
 )
@@ -163,8 +251,13 @@ onMounted(async () => {
   await loadConversations()
 
   const requested = route.query.conversation as string | undefined
+  const target = route.query.to as string | undefined
+
   if (requested && conversations.value.some((item) => item.id === requested)) {
     await selectConversation(requested)
+  } else if (target) {
+    // 从用户主页点「私信」进来：先进入草稿会话
+    await startDraft(target)
   } else if (conversations.value.length) {
     // 默认打开最近的一个会话，避免右侧一直空着
     await selectConversation(conversations.value[0].id)
@@ -243,21 +336,21 @@ function onComposerKeydown(event: KeyboardEvent) {
     </aside>
 
     <section class="chat__main miqu-card">
-      <template v-if="activeConversation">
+      <template v-if="displayedPartner">
         <header class="chat__head">
           <el-button
             text
             class="chat__back"
-            @click="router.push(`/users/${activeConversation.partner.id}`)"
+            @click="router.push(`/users/${displayedPartner.id}`)"
           >
             <UserAvatar
-              :src="activeConversation.partner.avatar"
-              :nickname="activeConversation.partner.nickname"
+              :src="displayedPartner.avatar"
+              :nickname="displayedPartner.nickname"
               :size="36"
             />
             <div class="chat__head-text">
-              <strong>{{ activeConversation.partner.nickname }}</strong>
-              <small>@{{ activeConversation.partner.username }}</small>
+              <strong>{{ displayedPartner.nickname }}</strong>
+              <small>@{{ displayedPartner.username }}</small>
             </div>
           </el-button>
         </header>
@@ -275,8 +368,8 @@ function onComposerKeydown(event: KeyboardEvent) {
           >
             <UserAvatar
               v-if="!message.mine"
-              :src="activeConversation.partner.avatar"
-              :nickname="activeConversation.partner.nickname"
+              :src="displayedPartner.avatar"
+              :nickname="displayedPartner.nickname"
               :size="32"
             />
             <div class="chat__bubble">

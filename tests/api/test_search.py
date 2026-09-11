@@ -150,8 +150,13 @@ def test_followed_by_me_reflects_real_relation(fresh_users):
 
     alice.post(f"/api/users/{bob_id}/follow")
 
-    data = alice.get("/api/users/search", params={"keyword": "qa", "size": 50}).data
-    flags = {item["username"]: item["followedByMe"] for item in data["list"]}
+    # 用**精确用户名**分别查询，而不是公共前缀 "qa"。
+    # 原因：测试库会随运行累积大量 qa* 用户，用公共前缀搜索时目标可能被挤出第一页，
+    # 使用例依赖全局数据、失去幂等性（本项目要求 pytest 可重复执行）。
+    def _followed_by_me(username: str):
+        data = alice.get("/api/users/search", params={"keyword": username, "size": 50}).data
+        flags = {item["username"]: item["followedByMe"] for item in data["list"]}
+        return flags.get(username)
 
-    assert flags.get(bob_username) is True
-    assert flags.get(carol_username) is False
+    assert _followed_by_me(bob_username) is True
+    assert _followed_by_me(carol_username) is False

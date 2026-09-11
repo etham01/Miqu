@@ -2,7 +2,6 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { userApi } from '@/api/user'
-import { conversationApi } from '@/api/message'
 import { useUserStore } from '@/stores/user'
 import type { Post, UserFollow, UserProfile } from '@/api/types'
 import { GENDER_LABELS, relativeTime } from '@/utils/format'
@@ -104,9 +103,12 @@ async function sendMessage() {
     router.push({ name: 'login', query: { redirect: route.fullPath } })
     return
   }
-  // 先取回（或创建）会话，再带着会话 ID 跳到消息页
-  const conversation = await conversationApi.open(userId.value)
-  router.push({ name: 'messages', query: { conversation: conversation.id } })
+  // 只带上对方 ID 跳到消息页，**不在这里预建会话**。
+  //
+  // 预建出来的会话一条消息都没有，而 `GET /api/conversations` 有意不返回空会话
+  // （避免列表里出现空白条目），于是消息页拿不到这个会话、聊天窗口打不开。
+  // 改由消息页进入「草稿会话」状态，发出第一条消息时再真正建会话。
+  router.push({ name: 'messages', query: { to: userId.value } })
 }
 
 function onPostDeleted(id: string) {

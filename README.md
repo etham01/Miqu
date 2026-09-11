@@ -42,7 +42,7 @@ miqu/
 │       │   ├── service/     # 接口 + impl（含 admin/ 子包）
 │       │   └── controller/  # 含 admin/ 子包
 │       ├── main/resources/  # application.yml / logback-spring.xml
-│       └── test/java/com/miqu/   # 285 个 JUnit 用例
+│       └── test/java/com/miqu/   # 289 个 JUnit 用例
 ├── frontend/                # Vue 3 + Vite + TypeScript + Element Plus
 │   └── src/
 │       ├── api/             # Axios 实例 + 按模块拆分的接口封装 + 与后端对齐的 TS 类型
@@ -54,7 +54,7 @@ miqu/
 │       ├── utils/           # 时间格式化等
 │       └── views/           # 页面（auth / home / search / user / post / message /
 │                            #      notification / profile / admin）
-└── tests/                   # pytest 接口自动化（201 个用例）
+└── tests/                   # pytest 接口自动化（229 个用例）
     ├── conftest.py          # 夹具：后端探活、登录态、随机用户工厂
     ├── api/                 # 按模块拆分的用例
     └── utils/client.py      # HTTP 封装（统一响应体解析）
@@ -360,6 +360,23 @@ mvn spring-boot:run
 
 ---
 
+## 六点五、核心业务规则（演示与验收要点）
+
+Miqu 有几条**容易被忽略、但已被自动化测试钉死**的业务规则，演示与验收时重点关注：
+
+1. **私信需要双方互相关注**（2026-09-11 冻结）
+   - 发送消息 `POST /api/messages` 与打开会话 `POST /api/conversations` 都要求 `A 关注 B 且 B 关注 A`；
+   - 非互关返回业务码 `403` / `NOT_MUTUAL_FOLLOW`（文案"需要互相关注后才能私聊"）；
+   - **历史会话不受影响**：解除互关后仍可读取历史消息、仍可标记已读，只是不能发送新消息、不能重新打开会话；
+   - **重新互关后自动恢复**发送能力（实时判断，不新增状态字段）；**管理员同样受约束**。
+2. **关系表物理删除、业务主表逻辑删除**：取消关注 / 取消点赞 / 动态图片是物理 `DELETE`（否则唯一键会被软删行占用，导致"取消后永远无法再次关注/点赞"）；动态与评论是逻辑删除。
+3. **白名单"失败关闭"**：不在白名单里的 `/api/**` 一律要求登录；`/api/users/me` 刻意不在白名单内。
+4. **统一响应与序列化**：HTTP 恒为 200，业务结果看响应体 `code`；`id` 是字符串、计数是数字、时间是 `yyyy-MM-dd HH:mm:ss`。
+
+> 演示脚本可参照：注册 → 登录 → 搜索用户 → 关注 → 对方回关（互关）→ 打开私聊 → 发送消息 → 取消关注 → 确认**发送被拒但历史仍可读** → 重新关注 → **恢复发送**。
+
+---
+
 ## 七、运行测试
 
 ```bash
@@ -376,7 +393,7 @@ cd backend && mvn test
 > 但**手工用 curl / 前端跑过的操作会真实提交**，之后测试断言种子数据（如"test001 有 2 条未读私信"）就会失败。
 > 遇到大批量、看起来莫名其妙的断言失败时，先重跑一遍 `schema.sql` + `data.sql`。
 
-当前 **212 个用例**：
+当前 **289 个用例**（按 `@Test` 方法实测统计；早期文档写"212"为陈旧数字）：
 
 | 测试类 | 用例数 | 覆盖内容 |
 |---|---|---|
@@ -396,6 +413,7 @@ cd backend && mvn test
 | `AdminReportControllerTest` | 18 | 举报列表与 `targetPreview`、**处置动作与目标类型校验**、驳回不能带处置、重复处理 409 |
 | `AdminStatsControllerTest` | 9 | 统计口径（不含已注销）、今日新增、待处理举报随处理下降 |
 | `ReportControllerTest` | 13 | 举报他人内容、不能举报自己、重复举报 409、目标不存在 404、类型非法 400 |
+| `HealthControllerTest` | 4 | 健康检查：真实探测数据库 UP/DOWN、响应结构、免登录可访问 |
 | `ResponseSerializationTest` | 6 | **id 是字符串、计数是数字、时间是格式化字符串**的全局约定 |
 | `EntitySchemaConsistencyTest` | 2 | **实体标注与真实表结构一致性**（防线见下方说明） |
 | `MiquApplicationTests` | 4 | 上下文装配、JWT 密钥长度、白名单不含 `/api/**`、分页上限 |
@@ -417,7 +435,7 @@ cd backend && mvn test
 ```bash
 # 先启动后端，然后
 pip install -r tests/requirements.txt
-cd tests && python -m pytest          # 201 个用例
+cd tests && python -m pytest          # 229 个用例
 python -m pytest -m smoke             # 只跑冒烟
 python -m pytest -m read              # 只跑只读用例
 ```
@@ -480,7 +498,7 @@ Bean Validation 对同一字段可能同时触发多条约束（空用户名会�
 | P6 | pytest 接口自动化（201 用例） | ✅ 完成 |
 | P7 | AI 测试用例生成（需求里的扩展目标） | ⬜ 待做 |
 
-**全部功能已实现并验证**：后端 38 个接口、前端 20+ 页面、两套测试共 486 个用例。
+**全部功能已实现并验证**：后端 38 个接口、前端 20+ 页面、两套测试共 518 个用例（JUnit 289 + pytest 229）。
 
 > 私信采用 **REST + 轮询**，未引入 WebSocket（需求明确"不要因为追求技术而导致项目复杂化"）。
 > 前端导航栏角标 15 秒轮询一次，聊天页打开时 3 秒轮询一次。

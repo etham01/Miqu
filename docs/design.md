@@ -1,8 +1,9 @@
 # Miqu「觅取」社交系统 —— 系统设计文档
 
-> 版本：v1.0（设计阶段，未开始编码）
+> 版本：v1.1（**已实现**：P0–P6 全部落地并通过 JUnit + pytest 验证；2026-09-11 冻结"私信需互关"规则）
 > 依据：`list.md` 项目开发需求
 > 目标：业务完整、结构清晰、接口规范、**易测试**、易扩展
+> 定位：本文档是**业务规则与设计的权威来源**。后续任何规则变更须**先更新本文档、再改代码、最后同步测试**。
 
 ---
 
@@ -22,6 +23,7 @@
 | Long 序列化 | Jackson 把 `Long`/`long` 序列化为 **String** | JS `Number` 精度 2^53，防前端 ID 精度丢失 |
 | 取消关注/点赞的幂等语义 | **404** `NOT_FOLLOWED` / `NOT_LIKED` ✅ **已确认** | 语义明确（"该关系不存在"），测试用例可直接断言；前端需对重复点击做防抖 |
 | 私信是否写通知表 | **不写**，只更新 `conversation.*_unread` ✅ **已确认** | 避免同一件事在通知页与消息页重复出现；未读数保持单一事实来源 |
+| 私信是否需要互关 | **需要**：`POST /api/messages` 与 `POST /api/conversations` 均要求**双方互相关注**；历史会话可读、可标记已读；解除互关后不可发送、重新互关自动恢复 ✅ **已确认（2026-09-11）** | 产品确认"互关才能私聊"。互关定义为 `isFollowing(A,B) && isFollowing(B,A)`；实时判断，不新增状态字段；管理员**不豁免**；非互关返回 `403 NOT_MUTUAL_FOLLOW`。详见【设计问题 3.7 与决策 16】 |
 
 ---
 
@@ -526,8 +528,28 @@ DELETE /api/comments/{id}
 
 ### 3.7 私信
 
+> **⚠️ 互关前置条件（2026-09-11 产品确认，已冻结）**
+>
+> 私信要求**双方互相关注**。
+>
+> - **互关定义**：`isFollowing(A,B) && isFollowing(B,A)`——仅判断两条 `follow` 记录是否都存在；**不额外判断 active**（`send` / `openConversation` 已有用户活跃状态校验）。
+> - **创建 / 打开会话** `POST /api/conversations`：要求互关，否则 `403 NOT_MUTUAL_FOLLOW`。
+> - **发送消息** `POST /api/messages`：要求互关，否则 `403 NOT_MUTUAL_FOLLOW`。
+> - **历史会话**：允许查看历史消息、允许标记已读（**不受**互关限制）。
+> - **解除互关后**：历史会话保留、历史消息可继续查看、可继续标记已读；**不允许发送新消息**、**不允许重新发起/打开会话**；**重新互关后发送能力自动恢复**。
+> - **实时判断**：互关状态每次请求实时查询，**不新增状态字段、不加缓存**。
+> - **无豁免**：**管理员同样受互关约束**，不享有私信豁免。
+> - **存量数据**：已存在的非互关历史会话同样受当前规则约束（**可读、不可发**）；`database/data.sql` 中现有的非互关会话**保留不动**，专门作为历史数据 / 回归测试场景。
+>
+> **规则变更顺序（本项目约定）**：先冻结业务规则文档（本节）→ 再改代码 → 最后同步测试。在规则冻结前不得改动代码。
+
 ```
+POST /api/conversations   body:{ targetUserId }
+  0. 互关校验：isFollowing(me,target) && isFollowing(target,me) → 否则 403 NOT_MUTUAL_FOLLOW
+  → 规整 (u1=min, u2=max) → SELECT 命中复用 / 无则 INSERT（幂等，uk_users 兜底）
+
 POST /api/messages   body:{ receiverId, content }     （或 { conversationId, content }）
+  0. 互关校验：isFollowing(me,receiver) && isFollowing(receiver,me) → 否则 403 NOT_MUTUAL_FOLLOW
   1. 长度 1~1000 → 否则 400
   2. receiverId != me → 否则 400 CANNOT_MESSAGE_SELF
   3. 接收者存在、未删、未禁用 → 否则 404/423
@@ -558,6 +580,8 @@ PUT /api/conversations/{id}/read
       WHERE conversation_id=? AND receiver_id=me AND is_read=0
     → UPDATE conversation SET {我的}_unread = 0
 ```
+
+**读操作不受互关限制**：`GET /api/conversations/{id}/messages` 与 `PUT /api/conversations/{id}/read` 只校验"me 是该会话参与者"（否则 403 `NOT_CONVERSATION_MEMBER`），**与双方当前是否互关无关**——这正是"解除互关后历史会话可读、可标记已读"的落点。
 
 **为什么用 `beforeId` 游标而非 offset**：聊天记录会不断新增，offset 分页会导致历史消息在翻页时错位/重复。这是本项目唯一强烈建议用游标的地方。
 
@@ -1229,6 +1253,21 @@ public Result<Void> handle(DuplicateKeyException e) {
 | 13 | 搜索转义 LIKE 通配符 | 关键词里的 `%` `_` `\` 必须转义并配 `ESCAPE '\\'`。**不转义的后果是搜一个 `%` 就返回全部用户**——既是信息泄漏也是注入式输入。转义在 Java 侧完成，SQL 用 `apply("... LIKE {0} ESCAPE '\\\\'", pattern)` 参数绑定 |
 | 14 | 序列化约定：id 是字符串、计数是数字 | 全局约定，见 README。**实现时真的踩过一次**：`Map.of("total", someLong)` 里的计数被自动装箱成 `Long`，被 JacksonConfig 当成 id 一样转成了字符串，导致私信未读数是 `"3"` 而通知未读数是 `3`。改用 `MessageUnreadVO(long total)` 基本类型修复，并新增 `ResponseSerializationTest` 守住 |
 | 15 | 通知的"全部标记已读"是幂等空操作 | 没有未读时执行不报错、不产生多余 UPDATE，前端可以放心在页面加载时无条件调用 |
+
+### P4 产品规则变更（2026-09-11 冻结）
+
+| # | 决策 | 结论 | 日期 |
+|---|---|---|---|
+| 16 | 私信需双方互相关注 | **要求互关**：`POST /api/messages`、`POST /api/conversations` 必须互关；历史会话可读、可标记已读；解除互关后不可发送、重新互关自动恢复。互关定义 `isFollowing(A,B) && isFollowing(B,A)`，实时判断，不新增状态字段。非互关返回 `403 NOT_MUTUAL_FOLLOW`，管理员不豁免。存量非互关会话同样受约束（可读不可发），`data.sql` 保留现状作为回归场景 | 2026-09-11 |
+
+**由决策 16 派生的强制约束**（阶段 1 编码时执行，当前仅冻结规则、不改代码）：
+
+1. `ErrorCode` 新增 `NOT_MUTUAL_FOLLOW(403, "需要互相关注后才能私聊")`（**阶段 1 才加**，本阶段不加）。
+2. `FollowStatusLoader` 新增 `isMutual(a,b)` 方法，由 `MessageService`、`ConversationService` 复用；**不新建表、不引入缓存**。
+3. `MessageServiceImpl.send` 与 `ConversationServiceImpl.openConversation` 在校验链前段插入互关校验；`listMessages` / `markRead` **不得**加互关校验。
+4. `MessageController` / `ConversationController` 的 Swagger `@ApiResponses` 补充 `403 NOT_MUTUAL_FOLLOW`。
+5. 前端私信入口可按 `mutual` 状态做 UI 收敛，但**后端必须做最终校验**，不信任前端。
+6. 规则变更导致失败的旧测试按"先补失败用例 → 改代码 → 再同步旧用例"的顺序处理，**禁止**删除 / 跳过 / 降低断言。
 
 **由决策 2、3 派生的强制约束**（编码时不要漏）：
 

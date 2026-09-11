@@ -53,6 +53,8 @@ public enum ErrorCode {
     CONVERSATION_NOT_FOUND(404, "会话不存在"),
     NOT_CONVERSATION_MEMBER(403, "你不是该会话的参与者"),
     CANNOT_MESSAGE_SELF(400, "不能给自己发送私信"),
+    /** 私信要求双方互相关注；非互关时不能发送消息、也不能打开/创建会话。 */
+    NOT_MUTUAL_FOLLOW(403, "需要互相关注后才能私聊"),
 
     // ---------- 通知 ----------
     NOTIFICATION_NOT_FOUND(404, "通知不存在"),

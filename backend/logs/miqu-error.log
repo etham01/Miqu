@@ -66,3 +66,37 @@
    DB_HOST（默认 localhost）· DB_PORT（默认 3306）· DB_NAME（默认 miqu）
 ============================================================
 
+2026-09-11 21:42:24.062 [main] ERROR o.s.b.d.LoggingFailureAnalysisReporter - 
+
+***************************
+APPLICATION FAILED TO START
+***************************
+
+Description:
+
+Web server failed to start. Port 8081 was already in use.
+
+Action:
+
+Identify and stop the process that's listening on port 8081 or configure this application to listen on another port.
+
+2026-09-11 21:45:17.595 [main] ERROR c.miqu.controller.HealthController - 健康检查：数据库连接失败 - Access denied for user 'root'@'localhost'
+2026-09-11 21:45:17.608 [main] ERROR c.miqu.controller.HealthController - 健康检查：数据库连接失败 - Access denied for user 'root'@'localhost' (using password: NO)
+2026-09-11 23:37:08.251 [main] ERROR o.s.b.d.LoggingFailureAnalysisReporter - 
+
+***************************
+APPLICATION FAILED TO START
+***************************
+
+Description:
+
+Web server failed to start. Port 28820 was already in use.
+
+Action:
+
+Identify and stop the process that's listening on port 28820 or configure this application to listen on another port.
+
+2026-09-12 10:22:37.144 [main] ERROR c.miqu.controller.HealthController - 健康检查：数据库连接失败 - Access denied for user 'root'@'localhost'
+2026-09-12 10:22:37.184 [main] ERROR c.miqu.controller.HealthController - 健康检查：数据库连接失败 - Access denied for user 'root'@'localhost' (using password: NO)
+2026-09-12 10:24:39.494 [main] ERROR c.miqu.controller.HealthController - 健康检查：数据库连接失败 - Access denied for user 'root'@'localhost'
+2026-09-12 10:24:39.510 [main] ERROR c.miqu.controller.HealthController - 健康检查：数据库连接失败 - Access denied for user 'root'@'localhost' (using password: NO)

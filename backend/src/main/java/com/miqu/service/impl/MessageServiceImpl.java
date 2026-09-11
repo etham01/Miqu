@@ -15,6 +15,7 @@ import com.miqu.mapper.MessageMapper;
 import com.miqu.service.ConversationService;
 import com.miqu.service.MessageService;
 import com.miqu.service.UserService;
+import com.miqu.service.support.FollowStatusLoader;
 import com.miqu.vo.MessageVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -35,6 +36,7 @@ public class MessageServiceImpl implements MessageService {
     private final ConversationMapper conversationMapper;
     private final ConversationService conversationService;
     private final UserService userService;
+    private final FollowStatusLoader followStatusLoader;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -47,6 +49,13 @@ public class MessageServiceImpl implements MessageService {
         }
         // 给被禁用的用户发私信没有意义，且会积累永远读不到的消息
         userService.requireActiveUser(receiverId);
+
+        // 私信要求双方互相关注（2026-09-11 冻结规则）。
+        // 校验必须在写入 message / 创建会话之前，否则非互关场景会先落库再报错。
+        // 历史消息读取（listMessages）与标记已读（markRead）不受此限制。
+        if (!followStatusLoader.isMutual(userId, receiverId)) {
+            throw BizException.of(ErrorCode.NOT_MUTUAL_FOLLOW);
+        }
 
         String content = request.content().trim();
         if (content.isEmpty()) {

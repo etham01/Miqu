@@ -39,6 +39,19 @@ class MessageControllerTest extends BaseControllerTest {
         return objectMapper.createObjectNode();
     }
 
+    /**
+     * 私聊要求双方互相关注（2026-09-11 冻结规则）：让 test001(id=2) 与 user 9(test008) 互相 follow。
+     *
+     * <p>本类中"发送成功/自动建会话/长度边界"等用例验证的是**消息本身**的行为，
+     * 因此先把前置关系补成互关——**只改前置数据，不改任何断言**。
+     * 基类带 {@code @Transactional}，这些关注关系会在用例结束后自动回滚。
+     */
+    private void makeMutualWithUser9(String test001Token) throws Exception {
+        exec(post("/api/users/9/follow").header("Authorization", bearer(test001Token)));
+        String user9Token = login("test008", "123456");
+        exec(post("/api/users/2/follow").header("Authorization", bearer(user9Token)));
+    }
+
     // ==================== 发送 ====================
 
     @Test
@@ -46,6 +59,7 @@ class MessageControllerTest extends BaseControllerTest {
     void send_success() throws Exception {
         String token = login("test001", "123456");
 
+        makeMutualWithUser9(token);
         JsonNode json = exec(post("/api/messages").header("Authorization", bearer(token))
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"receiverId\":9,\"content\":\"你好，初次联系\"}"));
@@ -64,6 +78,7 @@ class MessageControllerTest extends BaseControllerTest {
     @DisplayName("发送私信会自动创建会话，无需客户端先建")
     void send_createsConversation() throws Exception {
         String token = login("test001", "123456");
+        makeMutualWithUser9(token);
         long messageId = send(token, 9, "自动建会话");
 
         long conversationId = exec(get("/api/conversations").header("Authorization", bearer(token)))
@@ -213,6 +228,7 @@ class MessageControllerTest extends BaseControllerTest {
     @DisplayName("发送私信：恰好 1000 字符可以通过（边界值）")
     void send_contentExactlyMaxLength() throws Exception {
         String token = login("test001", "123456");
+        makeMutualWithUser9(token);
         mockMvc.perform(post("/api/messages").header("Authorization", bearer(token))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(

@@ -12,6 +12,7 @@ import com.miqu.mapper.ConversationMapper;
 import com.miqu.mapper.MessageMapper;
 import com.miqu.service.ConversationService;
 import com.miqu.service.UserService;
+import com.miqu.service.support.FollowStatusLoader;
 import com.miqu.service.support.UserBriefLoader;
 import com.miqu.vo.ConversationVO;
 import com.miqu.vo.UserBriefVO;
@@ -34,6 +35,7 @@ public class ConversationServiceImpl implements ConversationService {
     private final MessageMapper messageMapper;
     private final UserService userService;
     private final UserBriefLoader userBriefLoader;
+    private final FollowStatusLoader followStatusLoader;
 
     @Override
     public PageResult<ConversationVO> list(Long userId, PageQuery query) {
@@ -78,6 +80,12 @@ public class ConversationServiceImpl implements ConversationService {
             throw BizException.of(ErrorCode.CANNOT_MESSAGE_SELF);
         }
         userService.requireActiveUser(targetUserId);
+
+        // 私信要求双方互相关注（2026-09-11 冻结规则）：非互关不能打开/创建会话。
+        // 只限制"发起"，不影响历史会话的读取——listMessages / markRead 走 requireMember，不在此处。
+        if (!followStatusLoader.isMutual(userId, targetUserId)) {
+            throw BizException.of(ErrorCode.NOT_MUTUAL_FOLLOW);
+        }
 
         Conversation conversation = getOrCreateEntity(userId, targetUserId);
         return new ConversationVO(

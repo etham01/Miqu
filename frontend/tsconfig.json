@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "skipLibCheck": true,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "preserve",
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+    "types": ["vite/client"]
+  },
+  // 只检查 src/ 下的应用代码。
+  // vite.config.ts 用到 Node API，单独为它维护一份 composite 配置会引入
+  // "referenced project may not disable emit" 这类构建器约束，
+  // 而它本身由 Vite 自己解析，收益不大。
+  "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.vue"]
+}

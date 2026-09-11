@@ -1,0 +1,3 @@
+# Miqu 接口自动化测试依赖
+pytest>=8.0
+requests>=2.31

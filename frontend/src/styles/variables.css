@@ -1,0 +1,64 @@
+/* ============================================================
+   Miqu 设计令牌
+   品牌视觉：白色 + 黑灰 + 一个年轻化的强调色
+   主色 #5B5BD6 是偏冷的靛紫，与白底、中性灰搭配时有高级感，
+   同时与常见的"后台管理系统蓝"区分开。
+   ============================================================ */
+
+:root {
+  /* ---------- 品牌色 ---------- */
+  --miqu-primary: #5b5bd6;
+  --miqu-primary-hover: #4a4ac4;
+  --miqu-primary-soft: #efeffb;
+  --miqu-primary-softer: #f7f7fd;
+
+  /* 点缀色：用于点赞等需要"跳出来"的交互 */
+  --miqu-accent: #ff5a7a;
+
+  /* ---------- 中性色 ---------- */
+  --miqu-bg: #f7f8fa;
+  --miqu-surface: #ffffff;
+  --miqu-surface-hover: #fafbfc;
+  --miqu-text: #1a1a24;
+  --miqu-text-secondary: #646b7a;
+  --miqu-text-tertiary: #9aa1ad;
+  --miqu-border: #eef0f3;
+  --miqu-border-strong: #e2e5ea;
+
+  /* ---------- 圆角 ---------- */
+  --miqu-radius-lg: 16px;
+  --miqu-radius: 12px;
+  --miqu-radius-sm: 8px;
+
+  /* ---------- 阴影：轻、双层，避免"浮起来"的廉价感 ---------- */
+  --miqu-shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.04);
+  --miqu-shadow: 0 1px 3px rgba(16, 24, 40, 0.04), 0 6px 20px rgba(16, 24, 40, 0.05);
+  --miqu-shadow-hover: 0 4px 12px rgba(16, 24, 40, 0.08), 0 12px 32px rgba(16, 24, 40, 0.07);
+
+  /* ---------- 布局 ---------- */
+  --miqu-header-height: 60px;
+  --miqu-content-width: 1080px;
+
+  /* ---------- 过渡：统一时长，避免各处动画节奏不一致 ---------- */
+  --miqu-transition: 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ============================================================
+   覆盖 Element Plus 的主题色。
+   Element Plus 需要完整的色阶变量，只改 --el-color-primary
+   会导致 hover / disabled / 浅色背景仍是默认蓝。
+   色阶由主色与白色按比例混合得出。
+   ============================================================ */
+:root {
+  --el-color-primary: #5b5bd6;
+  --el-color-primary-light-3: #8c8ce2;
+  --el-color-primary-light-5: #adadeb;
+  --el-color-primary-light-7: #cecef3;
+  --el-color-primary-light-8: #dedef7;
+  --el-color-primary-light-9: #efeffb;
+  --el-color-primary-dark-2: #4949ab;
+
+  --el-border-radius-base: 10px;
+  --el-font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+}

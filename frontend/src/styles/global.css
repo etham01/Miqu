@@ -1,0 +1,113 @@
+@import './variables.css';
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--miqu-bg);
+  color: var(--miqu-text);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* ---------- 通用卡片 ---------- */
+.miqu-card {
+  background: var(--miqu-surface);
+  border-radius: var(--miqu-radius-lg);
+  box-shadow: var(--miqu-shadow-sm);
+  border: 1px solid var(--miqu-border);
+}
+
+.miqu-card--hoverable {
+  transition: box-shadow var(--miqu-transition), transform var(--miqu-transition);
+}
+
+.miqu-card--hoverable:hover {
+  box-shadow: var(--miqu-shadow-hover);
+}
+
+/* ---------- 页面容器 ---------- */
+.miqu-container {
+  width: 100%;
+  max-width: var(--miqu-content-width);
+  margin: 0 auto;
+  padding: 0 20px;
+}
+
+/* ---------- 页面过渡：轻量、不喧宾夺主 ---------- */
+.fade-slide-enter-active,
+.fade-slide-leave-active {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.fade-slide-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+.fade-slide-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+/* ---------- 文本截断 ---------- */
+.miqu-truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.miqu-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ---------- 滚动条：细一点，减少视觉噪音 ---------- */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d8dce3;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #c2c8d1;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 尊重用户的"减少动效"偏好 —— 需求要求动画不能过度，
+   对动效敏感的用户更应该被照顾。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,48 @@
+# ============================================================
+#  Miqu 项目排除规则
+#
+#  注意：.gitignore 只对**尚未被跟踪**的文件生效。
+#  如果某个文件在加入规则之前就已经提交过，需要显式移除跟踪：
+#      git rm --cached <路径>      # 只移出 git，不删本地文件
+# ============================================================
+
+# ---------- 含凭据的本地配置：绝不提交 ----------
+backend/src/main/resources/application-local.yml
+
+# ---------- 后端构建产物与运行时目录 ----------
+/backend/target/
+/backend/logs/
+/backend/uploads/
+
+# 从项目根目录启动时会在根下生成（见 README「常见启动问题」）
+/logs/
+/uploads/
+
+# ---------- 前端 ----------
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.vite/
+*.tsbuildinfo
+
+# ---------- Python 测试 ----------
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ---------- IDE ----------
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+# ---------- 操作系统 ----------
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ---------- 其他 ----------
+*.log
+*.tmp

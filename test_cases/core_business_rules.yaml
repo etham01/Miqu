@@ -1,0 +1,590 @@
+# Miqu 冻结业务规则用例
+#
+# 本文件登记「改了要拍板」的业务规则。每组规则带 rule / frozen_at。
+# pytest 字段是**指针**（唯一真相在 tests/），不是副本。
+# 字段定义见 ../docs/testing/TEST_CASE_SCHEMA.md
+#
+# 校验：cd tests && python -m pytest api/test_message_mutual_follow.py \
+#                              api/test_conversation_mutual_follow.py -v
+
+meta:
+  module: message / conversation / follow / like
+  frozen_rules: 1
+  last_verified: 2026-09-14
+  pytest_baseline: "248 passed / 0 failed"
+  junit_baseline: "291 run / 0 failures / 0 errors"
+
+# ============================================================
+# 一、互关私聊规则 —— 发送侧（MSG）
+# 规则：私信要求双方互相关注；限制的是「发起」，不影响历史消息读取。
+# ============================================================
+
+message_rules:
+
+  - id: MSG-001
+    title: 互关后可以发送私信
+    priority: P0
+    type: business_rule
+    rule: 私信要求双方互相关注（2026-09-11 冻结）
+    frozen_at: 2026-09-11
+    preconditions:
+      - A、B 均为新注册用户
+      - 已建立双向关注（A→B、B→A）
+    steps:
+      - A 向 B 发送私信，内容为 "你好"
+    expected:
+      code: 200
+      effect: 会话自动创建或复用；接收方未读 +1
+    pytest: api/test_message_mutual_follow.py::test_mutual_follow_allows_sending
+    status: implemented
+
+  - id: MSG-002
+    title: 无关注关系不能发送私信
+    priority: P0
+    type: business_rule
+    rule: 私信要求双方互相关注（2026-09-11 冻结）
+    frozen_at: 2026-09-11
+    preconditions:
+      - A、B 均为新注册用户
+      - A 与 B 之间不存在任何关注关系
+    steps:
+      - A 向 B 发送私信
+    expected:
+      code: 403
+      message: 需要互相关注后才能私聊
+      effect: 不产生会话、不产生未读、不落消息库
+    pytest: api/test_message_mutual_follow.py::test_stranger_cannot_send
+    status: implemented
+
+  - id: MSG-003
+    title: 单向关注（我关注了对方）不能发送私信
+    priority: P0
+    type: business_rule
+    rule: 互关是双向条件，单向关注不满足
+    frozen_at: 2026-09-11
+    preconditions:
+      - A 已关注 B
+      - B 未回关 A
+    steps:
+      - A 向 B 发送私信
+    expected:
+      code: 403
+      message: 需要互相关注后才能私聊
+    pytest: api/test_message_mutual_follow.py::test_one_way_follow_cannot_send
+    status: implemented
+    note: 这是最容易被漏掉的分支——发送者"看得见"对方，但互关要求双向。
+
+  - id: MSG-004
+    title: 单向关注（对方关注了我）不能发送私信
+    priority: P0
+    type: business_rule
+    rule: 互关是双向条件，反方向单向关注同样不满足
+    frozen_at: 2026-09-11
+    preconditions:
+      - B 已关注 A
+      - A 未回关 B
+    steps:
+      - A 向 B 发送私信
+    expected:
+      code: 403
+      message: 需要互相关注后才能私聊
+    pytest: api/test_message_mutual_follow.py::test_receiver_following_sender_only_cannot_send
+    status: implemented
+
+  - id: MSG-005
+    title: 取消互关后不能继续发送私信
+    priority: P0
+    type: business_rule
+    rule: 互关关系解除后，发送权限立即收回
+    frozen_at: 2026-09-11
+    preconditions:
+      - A、B 互关，且 A 已成功发送过消息
+    steps:
+      - 解除双向关注
+      - A 再次向 B 发送私信
+    expected:
+      code: 403
+      message: 需要互相关注后才能私聊
+    pytest: api/test_message_mutual_follow.py::test_cannot_send_after_unfollow
+    status: implemented
+
+  - id: MSG-006
+    title: 重新互关后恢复发送
+    priority: P0
+    type: business_rule
+    rule: 关注关系表是物理删除，关系可重建，权限随之恢复
+    frozen_at: 2026-09-11
+    preconditions:
+      - A、B 曾互关，已解除
+    steps:
+      - 重新建立双向关注
+      - A 向 B 发送私信
+    expected:
+      code: 200
+    pytest: api/test_message_mutual_follow.py::test_sending_is_restored_after_refollow
+    status: implemented
+
+  - id: MSG-007
+    title: 取消互关后历史消息仍可读取
+    priority: P0
+    type: business_rule
+    rule: 限制的是「发起新消息」，不是「查看已存在的对话」
+    frozen_at: 2026-09-11
+    preconditions:
+      - 互关期间已产生若干消息
+      - 已解除互关
+    steps:
+      - B 读取该会话的历史消息
+    expected:
+      code: 200
+      effect: 历史消息完整返回，按时间正序
+    pytest: api/test_message_mutual_follow.py::test_history_stays_readable_after_unfollow
+    status: implemented
+
+  - id: MSG-008
+    title: 取消互关后仍可标记已读
+    priority: P1
+    type: business_rule
+    rule: markRead 走 requireMember（只校验参与者身份），不经过互关校验
+    frozen_at: 2026-09-11
+    preconditions:
+      - 存在未读消息；已解除互关
+    steps:
+      - B 调用 PUT /api/conversations/{id}/read
+    expected:
+      code: 200
+      effect: 未读角标被清零（否则角标永远清不掉）
+    pytest: api/test_message_mutual_follow.py::test_mark_read_still_works_after_unfollow
+    status: implemented
+
+  - id: MSG-009
+    title: 被拒的发送不留下任何痕迹
+    priority: P0
+    type: business_rule
+    rule: 互关校验必须在写 message / 建会话之前
+    frozen_at: 2026-09-11
+    preconditions:
+      - A、B 非互关
+    steps:
+      - A 向 B 发送私信（预期被拒）
+      - 检查会话列表与未读数
+    expected:
+      code: 403
+      effect: 双方会话数为 0，未读数不变
+    pytest: api/test_message_mutual_follow.py::test_blocked_send_leaves_no_trace
+    status: implemented
+    note: 防止有人把校验挪到写库之后——那样接口同样报 403，但垃圾数据已落库。
+
+  - id: MSG-010
+    title: 不能给自己发送私信
+    priority: P1
+    type: business_rule
+    rule: 发送者与接收者不能是同一人
+    frozen_at: 2026-09-11
+    preconditions:
+      - 已登录用户 A
+    steps:
+      - A 以自己为 receiverId 发送私信
+    expected:
+      code: 400
+      message: 不能给自己发送私信
+    pytest: api/test_message_mutual_follow.py::test_self_check_precedes_mutual_check
+    status: implemented
+
+  - id: MSG-011
+    title: 校验顺序 —— DTO 校验先于互关校验
+    priority: P1
+    type: boundary
+    rule: content 的 @NotBlank 在 Service 之前执行，故空内容先返回 400
+    frozen_at: 2026-09-11
+    preconditions:
+      - A、B 非互关
+    steps:
+      - A 向 B 发送空白内容 "   "
+    expected:
+      code: 400
+      message: 消息内容不能为空
+    pytest: api/test_message_mutual_follow.py::test_dto_validation_precedes_mutual_check
+    status: implemented
+    note: |
+      早期文档记「非互关 + 空内容 = 403」是**错的**。
+      实测为 400——DTO 的 @NotBlank 先于 Service 执行。2026-09-14 已修正。
+
+  - id: MSG-012
+    title: 校验顺序 —— 接收者不存在 404 先于互关校验
+    priority: P1
+    type: boundary
+    preconditions:
+      - A 为登录用户；receiverId 指向不存在的用户
+    steps:
+      - A 向不存在的用户发送私信
+    expected:
+      code: 404
+      message: 用户不存在
+    pytest: api/test_message_mutual_follow.py::test_unknown_receiver_precedes_mutual_check
+    status: implemented
+
+  - id: MSG-013
+    title: 校验顺序 —— 接收者被禁用 423 先于互关校验
+    priority: P1
+    type: boundary
+    preconditions:
+      - 种子账号 banned001（id=12）状态为禁用
+    steps:
+      - A 向 banned001 发送私信
+    expected:
+      code: 423
+      message: 账号已被禁用，请联系管理员
+    pytest: api/test_message_mutual_follow.py::test_disabled_receiver_precedes_mutual_check
+    status: implemented
+
+  - id: MSG-014
+    title: 消息长度边界 1000 / 1001
+    priority: P2
+    type: boundary
+    rule: MESSAGE_CONTENT_MAX = 1000
+    frozen_at: 2026-09-11
+    preconditions:
+      - A、B 互关
+    steps:
+      - 发送 1000 字 → 期望 200
+      - 发送 1001 字 → 期望 400
+    expected:
+      code: 200
+    pytest: api/test_message.py::test_message_content_boundaries
+    status: implemented
+
+# ============================================================
+# 二、互关私聊规则 —— 会话侧（CONV）
+# 与 MSG 的分界：
+#   凡"能不能发/能不能读消息" → MSG
+#   凡"能不能打开会话/是不是会话成员" → CONV
+# ============================================================
+
+conversation_rules:
+
+  - id: CONV-001
+    title: 互关后可以打开会话
+    priority: P0
+    type: business_rule
+    rule: 私信要求双方互相关注（2026-09-11 冻结）
+    frozen_at: 2026-09-11
+    preconditions: [A、B 互关]
+    steps: [A 调用 POST /api/conversations，targetUserId 为 B]
+    expected:
+      code: 200
+      effect: 返回会话；已存在则复用，不重复创建
+    pytest: api/test_conversation_mutual_follow.py::test_mutual_follow_allows_opening
+    status: implemented
+
+  - id: CONV-002
+    title: 非互关不能打开会话
+    priority: P0
+    type: business_rule
+    rule: 私信要求双方互相关注（2026-09-11 冻结）
+    frozen_at: 2026-09-11
+    preconditions: [A、B 无任何关注关系]
+    steps: [A 调用 POST /api/conversations]
+    expected:
+      code: 403
+      message: 需要互相关注后才能私聊
+    pytest: api/test_conversation_mutual_follow.py::test_stranger_cannot_open_conversation
+    status: implemented
+
+  - id: CONV-003
+    title: 单向关注不能打开会话
+    priority: P0
+    type: business_rule
+    rule: 互关是双向条件
+    frozen_at: 2026-09-11
+    preconditions: [A 关注 B，B 未回关]
+    steps: [A 调用 POST /api/conversations]
+    expected:
+      code: 403
+      message: 需要互相关注后才能私聊
+    pytest: api/test_conversation_mutual_follow.py::test_one_way_follow_cannot_open_conversation
+    status: implemented
+
+  - id: CONV-004
+    title: 解除互关后不能重新打开会话
+    priority: P0
+    type: business_rule
+    rule: 打开会话同样受互关约束，不因会话已存在而放行
+    frozen_at: 2026-09-11
+    preconditions: [曾互关且已建会话，现已解除互关]
+    steps: [A 调用 POST /api/conversations]
+    expected:
+      code: 403
+      message: 需要互相关注后才能私聊
+    pytest: api/test_conversation_mutual_follow.py::test_cannot_reopen_after_unfollow
+    status: implemented
+
+  - id: CONV-005
+    title: 存量会话在解除互关后仍可读取历史
+    priority: P0
+    type: business_rule
+    rule: 可读不可发
+    frozen_at: 2026-09-11
+    preconditions: [互关期间已产生消息；现已解除互关]
+    steps: [B 读取该会话历史消息]
+    expected:
+      code: 200
+    pytest: api/test_conversation_mutual_follow.py::test_existing_conversation_stays_readable_after_unfollow
+    status: implemented
+
+  - id: CONV-006
+    title: 非参与者不能读取会话消息
+    priority: P0
+    type: security
+    rule: 会话只对参与者可见，与是否互关无关
+    frozen_at: 2026-09-11
+    preconditions: [A、B 有会话；C 是无关用户]
+    steps: [C 读取该会话消息]
+    expected:
+      code: 403
+      message: 你不是该会话的参与者
+    pytest: api/test_conversation_mutual_follow.py::test_non_member_cannot_read_conversation
+    status: implemented
+
+  - id: CONV-007
+    title: 非参与者不能标记会话已读
+    priority: P1
+    type: security
+    rule: markRead 与 listMessages 共用 requireMember 校验
+    frozen_at: 2026-09-11
+    preconditions: [A、B 有会话；C 是无关用户]
+    steps: [C 调用 PUT /api/conversations/{id}/read]
+    expected:
+      code: 403
+      message: 你不是该会话的参与者
+    pytest: api/test_conversation_mutual_follow.py::test_non_member_cannot_mark_read
+    status: implemented
+    note: |
+      【编号说明】此前 CONV-007 / CONV-008 出现过"同一行为被两条 ID 各描述一遍"
+      的冲突。根因是 CONV 与 MSG 的边界没定死。现已定死：
+      消息的发送/读取归 MSG，会话的打开/成员身份/已读归 CONV。
+      本条目即"非成员标记已读"，含义唯一，不再与 MSG 侧重复。
+
+  - id: CONV-008
+    title: 不能与自己发起会话
+    priority: P1
+    type: boundary
+    rule: 会话双方必须是两个不同用户
+    frozen_at: 2026-09-11
+    preconditions: [已登录用户 A]
+    steps: [A 以自己为 targetUserId 调用 POST /api/conversations]
+    expected:
+      code: 400
+      message: 不能给自己发送私信
+    pytest: api/test_conversation_mutual_follow.py::test_open_self_precedes_mutual_check
+    status: implemented
+    note: |
+      【编号说明】与 CONV-007 同理。本条目含义唯一："自己和自己不能建会话"，
+      与 MSG-010（"不能给自己发消息"）虽同源但入口不同、断言不同，
+      因此保留两条并各自注明入口，不再视为冲突。
+
+  - id: CONV-009
+    title: 目标用户不存在 → 404（先于互关校验）
+    priority: P1
+    type: boundary
+    preconditions: [targetUserId 指向不存在的用户]
+    steps: [A 调用 POST /api/conversations]
+    expected:
+      code: 404
+      message: 用户不存在
+    pytest: api/test_conversation_mutual_follow.py::test_open_unknown_user_precedes_mutual_check
+    status: implemented
+
+  - id: CONV-010
+    title: 目标用户被禁用 → 423（先于互关校验）
+    priority: P1
+    type: boundary
+    preconditions: [banned001（id=12）状态为禁用]
+    steps: [A 以 banned001 为 targetUserId 调用 POST /api/conversations]
+    expected:
+      code: 423
+      message: 账号已被禁用，请联系管理员
+    pytest: api/test_conversation_mutual_follow.py::test_open_disabled_user_precedes_mutual_check
+    status: implemented
+
+  - id: CONV-011
+    title: 未登录不能打开会话
+    priority: P1
+    type: security
+    rule: /api/** 默认失败关闭（不在白名单即受保护）
+    frozen_at: 2026-09-11
+    preconditions: [未携带 Token]
+    steps: [POST /api/conversations]
+    expected:
+      code: 401
+    pytest: api/test_conversation_mutual_follow.py::test_open_conversation_requires_login
+    status: implemented
+
+  - id: CONV-012
+    title: (A,B) 与 (B,A) 必须命中同一条会话
+    priority: P0
+    type: business_rule
+    rule: 服务端把两个 ID 规整为 (较小, 较大) 再查找；表上有 uk_users 唯一键与 CHECK(user1_id < user2_id)
+    frozen_at: 2026-09-11
+    preconditions: [A、B 互关]
+    steps:
+      - A 调用 POST /api/conversations(targetUserId=B)
+      - B 调用 POST /api/conversations(targetUserId=A)
+    expected:
+      code: 200
+      effect: 两次返回同一个会话 id
+    pytest: api/test_message.py::test_conversation_is_symmetric
+    status: implemented
+
+  - id: CONV-013
+    title: 建了但没发过消息的空会话不出现在列表
+    priority: P1
+    type: business_rule
+    rule: 会话列表过滤 last_message_time 为空的行
+    frozen_at: 2026-09-11
+    preconditions: [A、B 互关]
+    steps:
+      - A 仅调用 POST /api/conversations，不发消息
+      - A 查询会话列表
+    expected:
+      code: 200
+      effect: 列表 total 为 0
+    pytest: api/test_message.py::test_empty_conversation_is_hidden
+    status: implemented
+
+# ============================================================
+# 三、关注与点赞（FOL / LIKE）
+# 关系表均为**物理删除**，取消后可以重新建立。
+# ============================================================
+
+follow_and_like_rules:
+
+  - id: FOL-001
+    title: 重复关注返回 409
+    priority: P1
+    type: business_rule
+    rule: follow 表有 uk_follower_following 唯一键，Service 先查再插只做快速失败
+    frozen_at: 2026-09-11
+    preconditions: [A 已关注 B]
+    steps: [A 再次关注 B]
+    expected:
+      code: 409
+      message: 已经关注过该用户
+    pytest: api/test_follow.py::test_duplicate_follow_returns_conflict
+    status: implemented
+
+  - id: FOL-002
+    title: 取消关注后可以重新关注
+    priority: P0
+    type: business_rule
+    rule: 关系表物理删除（无 deleted 列），否则唯一键会被软删记录占用
+    frozen_at: 2026-09-11
+    preconditions: [A 关注 B 后又取消]
+    steps: [A 重新关注 B]
+    expected:
+      code: 200
+    pytest: api/test_follow.py::test_follow_again_after_unfollow
+    status: implemented
+
+  - id: FOL-003
+    title: 未关注就取消关注 → 404
+    priority: P1
+    type: business_rule
+    frozen_at: 2026-09-11
+    preconditions: [A 未关注 B]
+    steps: [A 取消关注 B]
+    expected:
+      code: 404
+      message: 尚未关注该用户
+    pytest: api/test_follow.py::test_unfollow_without_following
+    status: implemented
+
+  - id: FOL-004
+    title: 不能关注自己
+    priority: P1
+    type: business_rule
+    frozen_at: 2026-09-11
+    steps: [A 关注自己]
+    expected:
+      code: 400
+      message: 不能关注自己
+    pytest: api/test_follow.py::test_cannot_follow_self
+    status: implemented
+
+  - id: FOL-005
+    title: 不能关注被禁用用户 → 423
+    priority: P1
+    type: business_rule
+    rule: 避免给禁用账号积累粉丝
+    frozen_at: 2026-09-11
+    preconditions: [banned001（id=12）状态禁用]
+    steps: [A 关注 banned001]
+    expected:
+      code: 423
+    pytest: api/test_follow.py::test_follow_disabled_user
+    status: implemented
+
+  - id: FOL-006
+    title: 关注不存在 / 已注销用户 → 404
+    priority: P1
+    type: business_rule
+    frozen_at: 2026-09-11
+    preconditions: [deleted001（id=13）逻辑删除]
+    steps: [A 关注 deleted001]
+    expected:
+      code: 404
+    pytest: api/test_follow.py::test_follow_deleted_user
+    status: implemented
+
+  - id: LIKE-001
+    title: 重复点赞返回 409
+    priority: P1
+    type: business_rule
+    rule: post_like 表有 uk_post_user 唯一键
+    frozen_at: 2026-09-11
+    preconditions: [B 已点赞该动态]
+    steps: [B 再次点赞]
+    expected:
+      code: 409
+      message: 已经点赞过该动态
+    pytest: api/test_post.py::test_duplicate_like_returns_conflict
+    status: implemented
+
+  - id: LIKE-002
+    title: 取消点赞后可以再次点赞
+    priority: P0
+    type: business_rule
+    rule: 关系表物理删除
+    frozen_at: 2026-09-11
+    preconditions: [B 点赞后又取消]
+    steps: [B 重新点赞]
+    expected:
+      code: 200
+    pytest: api/test_post.py::test_like_again_after_unlike
+    status: implemented
+
+  - id: LIKE-003
+    title: 未点赞就取消点赞 → 404
+    priority: P1
+    type: business_rule
+    frozen_at: 2026-09-11
+    preconditions: [B 未点赞该动态]
+    steps: [B 取消点赞]
+    expected:
+      code: 404
+    pytest: api/test_post.py::test_unlike_without_like_returns_not_found
+    status: implemented
+
+  - id: LIKE-004
+    title: 点赞计数与实际关系一致
+    priority: P1
+    type: business_rule
+    rule: like_count 是冗余字段，需与 post_like 行数一致
+    frozen_at: 2026-09-11
+    preconditions: [动态由 A 发布]
+    steps: [多个不同用户分别点赞]
+    expected:
+      code: 200
+      effect: likeCount 等于实际点赞人数
+    pytest: api/test_post.py::test_like_count_accumulates_across_users
+    status: implemented

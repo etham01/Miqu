@@ -20,7 +20,12 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import jakarta.annotation.PostConstruct;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -36,6 +41,18 @@ public class ConversationServiceImpl implements ConversationService {
     private final UserService userService;
     private final UserBriefLoader userBriefLoader;
     private final FollowStatusLoader followStatusLoader;
+    private final PlatformTransactionManager transactionManager;
+
+    /**
+     * 专门用来"跳出当前事务快照"的读模板（见 {@link #getOrCreateEntity} 的冲突分支）。
+     */
+    private TransactionTemplate freshReadTemplate;
+
+    @PostConstruct
+    void initFreshReadTemplate() {
+        this.freshReadTemplate = new TransactionTemplate(transactionManager);
+        this.freshReadTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    }
 
     @Override
     public PageResult<ConversationVO> list(Long userId, PageQuery query) {
@@ -158,7 +175,18 @@ public class ConversationServiceImpl implements ConversationService {
         } catch (DuplicateKeyException e) {
             // 并发下两个请求同时创建同一会话，由 uk_users 兜底。
             // MySQL 的唯一键冲突只回滚该条语句、不会中止事务，因此这里可以安全地重查一次。
-            Conversation raced = find(user1, user2);
+            //
+            // 但重查**不能**在本事务里做：MySQL 默认 REPEATABLE READ，
+            // 本事务的一致性读快照在这之前（requireActiveUser 的查用户）就已经建立，
+            // 之后并发事务即使提交了这条会话，普通 select 也依然看不见，
+            // 于是重查结果仍为 null → 异常继续往上抛成 409（实测 8 并发首次发消息有 4 条被拒）。
+            //
+            // 也不能用 SELECT ... FOR UPDATE 做"当前读"：多个事务在同一 gap 上加锁，
+            // 实测直接死锁（MySQLTransactionRollbackException）。
+            //
+            // 正确做法是**开一个新事务**去读：新事务拥有全新的 read view，一定能读到那条已提交的记录。
+            // —— 2026-09-14 修复
+            Conversation raced = freshReadTemplate.execute(status -> find(user1, user2));
             if (raced == null) {
                 throw e;
             }

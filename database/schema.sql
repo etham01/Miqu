@@ -50,6 +50,7 @@ CREATE TABLE `user` (
     KEY `idx_create_time` (`create_time`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '用户表';
 
+
 -- ------------------------------------------------------------
 -- follow 关注关系表（物理删除，无 deleted）
 -- ------------------------------------------------------------

@@ -44,10 +44,11 @@ MIQU_BASE_URL=http://localhost:8080 python -m pytest
 常用筛选：
 
 ```bash
-python -m pytest -m smoke          # 只跑冒烟用例
+python -m pytest -m smoke          # 只跑冒烟用例（43 条）
 python -m pytest -m read           # 只跑只读用例（不改数据）
 python -m pytest api/test_admin.py -v
 python -m pytest -k "wildcard"     # 按关键字筛
+python -m pytest api/test_message_mutual_follow.py api/test_conversation_mutual_follow.py -v
 ```
 
 ---
@@ -97,7 +98,7 @@ mysql -u root -p < database/data.sql
 | 文件 | 用例数 | 覆盖 |
 |---|---|---|
 | `api/test_auth.py` | 19 | 注册（成功/重复/大小写归一化/四类参数校验）、登录（成功/密码错/用户不存在/禁用/注销）、**禁用后旧 Token 立即失效**、退出 |
-| `api/test_user.py` | 18 | 当前用户、资料修改（含**不能越权改用户名/邮箱/角色**）、改密码全流程、头像、白名单边界 |
+| `api/test_user.py` | 20 | 当前用户、资料修改（含**不能越权改用户名/邮箱/角色**）、改密码全流程、头像（含**外链被拒 / 前缀近似串被拒**）、白名单边界 |
 | `api/test_follow.py` | 19 | 关注/取消/重复 409/关注自己 400/禁用 423/注销 404、**取消后可重新关注**、关注与粉丝列表、`followedByMe` 回关标识、互相关注、关注流隔离 |
 | `api/test_post.py` | 31 | 发布（含图片顺序）、空内容/超长边界/超 9 图/**外链图片被拒**、列表分页与倒序、关注流需登录、详情图片有序、删除权限（作者/他人 403/管理员）、点赞全流程（含**取消后可再次点赞**） |
 | `api/test_comment.py` | 13 | 发表、空内容/长度边界、动态不存在、列表正序、删除权限、重复删除 404 |
@@ -105,12 +106,12 @@ mysql -u root -p < database/data.sql
 | `api/test_notification.py` | 16 | 关注/点赞/评论各自产生通知、取消时撤回、**自操作不通知**、单条/全部已读、不能操作他人通知、未读数结构 |
 | `api/test_search.py` | 15 | 昵称/用户名匹配、粉丝数倒序、**LIKE 通配符 `%` `_` `\` 转义**、关键词校验、`followedByMe` |
 | `api/test_admin.py` | 53 | **访问控制矩阵**（11 个后台接口 × 未登录 401 / 非管理员 403 / 管理员 200）、统计、用户管理（禁用/解禁/不能操作自己）、内容管理、**举报处理（含处置动作与非法组合）**、操作日志 |
-| `api/test_message_mutual_follow.py` | 10 | **互关私聊规则**（2026-09-11 冻结）：互关可发、非互关/单向/解除互关 403 `NOT_MUTUAL_FOLLOW`、历史可读、仍可标记已读、重新互关恢复、存量非互关会话可读不可发 |
-| `api/test_conversation_mutual_follow.py` | 4 | 会话互关规则：互关可打开、非互关 403、解除互关后历史可读、不可重新打开 |
-| `api/test_concurrency.py` | 5 | 并发：重复注册（唯一键兜底）、并发重复关注/点赞（恰好 1 行、计数只 +1）、并发建会话（同一条）、并发发消息（条数=未读=成功数） |
-| `api/test_file.py` | 9 | 文件上传安全：正常上传（png/jpg/gif/webp）、空文件、超 5MB、**伪后缀（魔数不符）被拒**、极小文件、未登录 401 |
+| `api/test_message_mutual_follow.py` | 14 | **互关私聊规则（发送侧，2026-09-11 冻结）**：互关可发、非互关/单向/解除互关 403 `NOT_MUTUAL_FOLLOW`、历史可读、仍可标记已读、重新互关恢复、**被拒请求不留痕**、校验优先级（DTO 400 > 自己 400 > 接收者 404/423 > 互关 403） |
+| `api/test_file.py` | 14 | 文件上传安全：正常上传（png/jpg/gif/webp）、**URL 可访问闭环**、空文件、超 5MB、**伪后缀（魔数不符）被拒**、**MIME 与内容不符被拒**、极小文件、真图错后缀放行、未登录 401、缺 `file` 字段 / 非 multipart → 400 |
+| `api/test_conversation_mutual_follow.py` | 11 | **会话互关规则**：互关可打开、非互关/单向/解除互关 403、存量会话历史仍可读、**非参与者读会话与标记已读 403**、与自己/不存在/禁用目标的校验优先级、未登录 401 |
+| `api/test_concurrency.py` | 6 | 并发：重复注册（唯一键兜底）、并发重复关注/取关（恰好 1 行、计数只 +1）、并发重复点赞（恰好 1 行、likeCount 只 +1）、并发建会话（收敛为同一条）、并发发消息（条数 = 未读 = 成功数） |
 
-合计 **229 个用例**。
+合计 **248 个用例**（2026-09-14 实测；其中 246 为基线，新增 2 条为 BUG-005 回归）。
 
 ---
 
@@ -128,6 +129,104 @@ mysql -u root -p < database/data.sql
 要覆盖它需要第二个管理员账号（在 `data.sql` 里补一个 `admin2`），
 或写直接改库的集成测试。这里**不假装覆盖**，明确记为缺口——
 `test_disable_self_is_blocked_before_admin_guard` 的注释里有完整说明。
+
+**更高并发（数十线程同一瞬间首建会话）未压测。**
+`test_concurrency.py` 只做到 8 线程（已通过）。更高并发属压测范畴，
+不做推测性断言（见 `docs/testing/PERFORMANCE_TEST_PLAN.md`）。
+
+**`PUT /api/users/me/avatar` 不校验 `/uploads/` 前缀 —— 已于 2026-09-14 修复。**
+
+原先只校验非空与长度，任意外链都能写进头像，与动态图片的校验不对称。
+Bug Hunt 用 API 探针实证复现（`https://evil.example.com/track.png` 返回 200 并落库）后修复：
+`UserServiceImpl.updateAvatar` 复用与 `PostServiceImpl.validateImageUrls` 一致的前缀校验。
+回归用例：`test_update_avatar_rejects_external_url`、`test_update_avatar_rejects_lookalike_prefix`
+（JUnit 侧 2 条）——见 `docs/testing/bug_report.md` BUG-005。
+
+> 遗留（不影响接口校验）：`data.sql` 里 21 个种子用户的头像仍是外部图床
+> `https://i.pravatar.cc/...`。校验只作用于写入，存量行不受影响；
+> "文档要求相对路径、种子却是外链"这处数据侧不一致依然存在。
+
+**前端无单元/组件测试。** 项目未引入 Vitest 等前端测试框架，属有意取舍；
+前端验证靠 `npm run build` + 真实浏览器走查（`docs/testing/TEST_EXECUTION_REPORT.md` §6）。
+
+不过**前端状态层的回归已由 `browser_regression.mjs` 兜住**（见下节）——2026-09-14 的
+Bug Hunt 发现：有 3 个真实缺陷（BUG-002/003/004）**pytest 完全测不出来**，
+因为后端每次返回都是对的，错在前端没把请求发出去。这类缺陷只能在真实浏览器里回归。
+
+> 完整的缺口登记（含未实现项与原因）见 `test_cases/`（`status: gap` 的条目）
+> 与 `docs/testing/TEST_COVERAGE_MATRIX.md` §6。
+
+---
+
+## 三个可选的验证脚本（不参与 pytest）
+
+`api/` 之外还有三个**独立**的验证脚本，用于"不只跑测试，还真的走一遍"的场景。
+它们不被 pytest 收集（文件名不是 `test_*.py`），也不进 `requirements.txt`。
+
+### `browser_regression.mjs` —— 前端状态一致性回归（**新增**）
+
+```bash
+# 先后端 8081、前端 5173 都要起着
+NO_PROXY=localhost,127.0.0.1 node tests/browser_regression.mjs
+```
+
+12 项断言，用真实 Chrome 覆盖 **pytest 表达不出来**的那一层：
+
+| 用例 | 覆盖 | 修复前 |
+|---|---|---|
+| `BUG-001` | 取消关注后关注流不残留对方动态（4 项） | PASS（本就不是缺陷） |
+| `BUG-002` | 首页切 tab 后标签与数据一致（3 项） | **FAIL** |
+| `BUG-003` | 搜索换关键词后地址栏/输入框/结果一致（3 项） | **FAIL** |
+| `BUG-004` | 通知切类型后标签与数据一致（2 项） | **FAIL** |
+
+手法：把首屏请求**人为延迟**，稳定放大"还在飞就点了下一个筛选条件"的竞态窗口。
+退出码 0 = 全通过；1 = 有断言失败；2 = 后端/前端没起。
+
+最近一次结果：**12/12 PASS**（2026-09-14，修复后）。修复前为 5 PASS / 6 FAIL。
+
+> 它红**不会**污染 pytest 的绿灯（pytest.ini 的 `testpaths = api`，只收 `test_*.py`）。
+> 对应登记见 `test_cases/security_and_concurrency.yaml` 的 `CONC-008` ~ `CONC-011`
+> （用 `browser` 指针，校验脚本 `test_cases/check_consistency.py` 会核对指针真实性）。
+
+### `e2e_walkthrough.py` —— 端到端真实链路
+
+```bash
+# 需要后端已启动
+python e2e_walkthrough.py                       # 默认 http://127.0.0.1:8081
+python e2e_walkthrough.py http://localhost:8080 # 指定地址
+```
+
+按真实用户流程逐步断言并打印 PASS/FAIL：
+
+```
+健康检查 → 注册+登录 → 查看/修改资料 → 修改密码 → 搜索用户 → 关注 → 重复关注 409
+→ 回关（互关）→ 打开会话 → 发送私信 → 读取历史 → 标记已读
+→ 创建动态 → 点赞 → 重复点赞 409 → 评论
+→ 通知（关注/点赞/评论）→ 全部已读
+→ 上传图片 → 伪装图片被拒 → 上传 URL 可访问
+→ 取消互关 → 发送被拒 403 → 不能重开会话 403 → 历史仍可读 → 仍可标记已读
+→ 重新互关 → 恢复发送
+→ 管理员登录 → 统计 → 用户管理 → 举报处理 → 未登录访问管理端 401
+```
+
+最近一次结果：**41/41 通过**。它断言的是"这条链路真的通"，
+与 pytest 的分支断言互补。
+
+### `browser_check.mjs` —— 真实浏览器走查（可选）
+
+```bash
+cd frontend && npm run dev     # 先起前端
+node tests/browser_check.mjs   # 另开终端
+```
+
+用真实 Chrome 打开前端，走 登录 → 首页 → 私聊 → 通知 → 搜索 → 个人中心，
+并收集**控制台报错**与**未捕获 JS 异常**（这两样正是"白屏 / 按钮没反应"的信号）。
+
+前置条件：本机有 Chrome，且能加载到 `playwright`（`npm i -D playwright`）。
+截图输出到 `.workbuddy/screenshots/`。
+
+最近一次结果：**11/12**。唯一"失败"项是外部头像图床
+`i.pravatar.cc` 被网络策略拦截，属环境问题而非代码缺陷。
 
 ---
 

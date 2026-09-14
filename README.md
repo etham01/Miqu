@@ -42,7 +42,7 @@ miqu/
 │       │   ├── service/     # 接口 + impl（含 admin/ 子包）
 │       │   └── controller/  # 含 admin/ 子包
 │       ├── main/resources/  # application.yml / logback-spring.xml
-│       └── test/java/com/miqu/   # 289 个 JUnit 用例
+│       └── test/java/com/miqu/   # 291 个 JUnit 用例
 ├── frontend/                # Vue 3 + Vite + TypeScript + Element Plus
 │   └── src/
 │       ├── api/             # Axios 实例 + 按模块拆分的接口封装 + 与后端对齐的 TS 类型
@@ -54,10 +54,18 @@ miqu/
 │       ├── utils/           # 时间格式化等
 │       └── views/           # 页面（auth / home / search / user / post / message /
 │                            #      notification / profile / admin）
-└── tests/                   # pytest 接口自动化（229 个用例）
+└── tests/                   # pytest 接口自动化（248 个用例）
     ├── conftest.py          # 夹具：后端探活、登录态、随机用户工厂
-    ├── api/                 # 按模块拆分的用例
+    ├── api/                 # 13 个用例文件，按模块拆分
+    ├── browser_regression.mjs  # 前端状态一致性回归（真实 Chrome，12 项断言）
     └── utils/client.py      # HTTP 封装（统一响应体解析）
+
+test_cases/                  # YAML 测试用例（设计与管理文档，不参与执行）
+docs/                        # 设计文档 + 接口文档 + 测试文档
+├── design.md                # 系统设计（架构 / ER / 业务流程）
+├── TESTING_GUIDELINES.md    # 测试编写规范（动手前先读）
+├── api/                     # 50 个接口的完整文档
+└── testing/                 # 测试体系 / 用例规范 / 覆盖矩阵 / 执行报告 / 压测方案
 ```
 
 ---
@@ -356,7 +364,9 @@ mvn spring-boot:run
 > 个人中心就变成免登录可访问了。`/api/posts?tab=following` 虽然路径在白名单里，
 > 但未登录会被 Service 拦下返回 401。
 
-完整接口清单（含后续阶段）见 `docs/design.md` 第 4 节。
+完整接口清单见 **[`docs/api/README.md`](docs/api/README.md)**（50 个接口，以生产代码为唯一事实来源反向整理，
+含通用约定、各模块字段与错误码）。`docs/design.md` 第 4 节是**设计阶段**的接口清单，
+两者口径不同，以 `docs/api/` 为准。
 
 ---
 
@@ -393,7 +403,7 @@ cd backend && mvn test
 > 但**手工用 curl / 前端跑过的操作会真实提交**，之后测试断言种子数据（如"test001 有 2 条未读私信"）就会失败。
 > 遇到大批量、看起来莫名其妙的断言失败时，先重跑一遍 `schema.sql` + `data.sql`。
 
-当前 **289 个用例**（按 `@Test` 方法实测统计；早期文档写"212"为陈旧数字）：
+当前 **291 个用例**（按 `@Test` 方法实测统计；早期文档写"212"为陈旧数字）：
 
 | 测试类 | 用例数 | 覆盖内容 |
 |---|---|---|
@@ -403,7 +413,7 @@ cd backend && mvn test
 | `CommentControllerTest` | 20 | 列表时间正序与分页、发表/空内容 400/超长边界 500 字、动态不存在 404、删除权限（作者/他人 403/管理员）、重复删除 404、评论通知与内容快照、自评不通知 |
 | `AuthControllerTest` | 19 | 注册成功/用户名长度/字符规则/为空/密码长度/邮箱格式/重复用户名/重复邮箱/邮箱大小写归一化；登录成功/密码错误/用户不存在/账号禁用/账号注销/参数为空；退出登录 |
 | `NotificationControllerTest` | 19 | 列表倒序、按类型/已读过滤、**数据按接收者隔离**、未读数分类与合计、单条已读幂等、**操作他人通知 403**、全部已读只影响自己 |
-| `UserControllerTest` | 18 | 未登录拦截、伪造 Token、缺 Bearer 前缀、**禁用后旧 Token 立即失效**、注销账号 Token、不存在用户 Token、查询/修改资料/改头像/改密码全流程 |
+| `UserControllerTest` | 20 | 未登录拦截、伪造 Token、缺 Bearer 前缀、**禁用后旧 Token 立即失效**、注销账号 Token、不存在用户 Token、查询/修改资料/改头像（含**外链与近似前缀被拒**）/改密码全流程 |
 | `MessageControllerTest` | 17 | 发送成功、自动建会话、复用已有会话、接收方未读 +1 / 发送方不增、预览截断 100 字、给自己发 400、接收者 404/423、内容边界 1000 字、未读数 |
 | `UserSearchTest` | 16 | 昵称/用户名匹配、部分匹配、粉丝数倒序、**LIKE 通配符 `%` `_` `\` 转义**、游客与登录的 `followedByMe`、关键词长度与 size 校验 |
 | `PostLikeControllerTest` | 12 | 点赞/重复点赞 409/取消/未点赞 404、**取消后可再次点赞**、反复切换计数一致、未登录 401、点赞通知生成与撤回、自赞不通知 |
@@ -435,8 +445,8 @@ cd backend && mvn test
 ```bash
 # 先启动后端，然后
 pip install -r tests/requirements.txt
-cd tests && python -m pytest          # 229 个用例
-python -m pytest -m smoke             # 只跑冒烟
+cd tests && python -m pytest          # 248 个用例
+python -m pytest -m smoke             # 只跑冒烟（43 条）
 python -m pytest -m read              # 只跑只读用例
 ```
 
@@ -451,7 +461,42 @@ python -m pytest -m read              # 只跑只读用例
 pytest 那套遵循两条纪律：**断言用差值不用绝对值**、**写数据只用当次新建的随机用户**。
 因此它是**幂等**的——连跑两次结果一致，中途不需要重置数据库。
 
-详见 [`tests/README.md`](tests/README.md)，其中也记录了已知的覆盖缺口。
+**248 个用例的分布：**
+
+| 文件 | 用例数 | 覆盖 |
+|---|---|---|
+| `api/test_admin.py` | 53 | 后台 11 接口的访问控制矩阵、统计、用户/内容管理、举报处置、操作日志 |
+| `api/test_post.py` | 31 | 发布与边界、列表分页、删除权限、点赞全流程 |
+| `api/test_follow.py` | 19 | 关注/取关/重复/自关注/禁用/注销、关注与粉丝列表、回关标识 |
+| `api/test_auth.py` | 19 | 注册校验、登录各失败分支、**禁用后旧 Token 立即失效** |
+| `api/test_user.py` | 20 | 资料与密码修改、**不能越权改用户名/邮箱/角色**、白名单边界、**头像外链与近似前缀被拒** |
+| `api/test_message.py` | 17 | 发私信建会话、未读数、标记已读、游标分页、非成员 403 |
+| `api/test_notification.py` | 16 | 关注/点赞/评论通知的产生与撤回、自操作不通知、已读状态 |
+| `api/test_search.py` | 15 | 昵称/用户名匹配、粉丝数倒序、**LIKE 通配符转义** |
+| `api/test_message_mutual_follow.py` | 14 | **互关私聊规则（发送侧）** |
+| `api/test_file.py` | 14 | **上传安全：魔数、大小、MIME、空/极小文件、可访问性** |
+| `api/test_comment.py` | 13 | 发表、长度与空内容、删除权限 |
+| `api/test_conversation_mutual_follow.py` | 11 | **互关私聊规则（会话侧）**、非参与者隔离 |
+| `api/test_concurrency.py` | 6 | **并发注册/关注/取关/点赞/建会话/发消息** |
+
+**另有一层浏览器回归**（`tests/browser_regression.mjs`，真实 Chrome，12 项断言）：
+前端状态一致性问题（切 tab / 换关键词 / 切通知类型后，标签与实际数据是否同源）。
+这类缺陷 **pytest 与 JUnit 都测不到**——后端每次返回都是对的，错在前端没把请求发出去。
+跑法：起后端 8081 与前端 5173 后 `NO_PROXY=localhost,127.0.0.1 node tests/browser_regression.mjs`。
+
+详见 [`tests/README.md`](tests/README.md)（含已知覆盖缺口）。
+测试体系全貌、用例规范、覆盖矩阵与**最近一次真实执行结果**见：
+
+- [`docs/testing/MIQU_TEST_SYSTEM.md`](docs/testing/MIQU_TEST_SYSTEM.md) —— 体系总览与怎么跑
+- [`docs/TESTING_GUIDELINES.md`](docs/TESTING_GUIDELINES.md) —— 写用例的规范与三条硬纪律
+- [`docs/testing/TEST_COVERAGE_MATRIX.md`](docs/testing/TEST_COVERAGE_MATRIX.md) —— 接口/规则 → 用例对照
+- [`docs/testing/TEST_EXECUTION_REPORT.md`](docs/testing/TEST_EXECUTION_REPORT.md) —— 本次执行数据
+- [`test_cases/`](test_cases/README.md) —— YAML 用例（设计与管理文档，**不参与执行**）
+
+> **`test_cases/` 与 pytest 的关系**：YAML 登记"冻结的业务规则长什么样"，
+> pytest 是唯一可执行的事实来源，二者**不做 1:1 复制**（避免维护两份真相）。
+> YAML 里的 `pytest` 字段是指针，可用
+> `python test_cases/check_consistency.py` 校验所有指针都指向真实用例。
 
 ### 一个关于断言精度的约定
 
@@ -495,10 +540,14 @@ Bean Validation 对同一字段可能同时触发多条约束（空用户名会�
 | P3 | 私信（会话 + 消息）/ 通知查询与已读 / 用户搜索 | ✅ 完成 |
 | P4 | 管理后台：数据统计 / 用户 / 动态 / 评论 / 举报 / 操作日志 | ✅ 完成 |
 | P5 | 前端：Vue 3 + Vite + TS + Element Plus，含管理后台 | ✅ 完成 |
-| P6 | pytest 接口自动化（201 用例） | ✅ 完成 |
+| P6 | pytest 接口自动化（248 用例）+ 互关私聊 / 文件安全 / 并发 / 前端状态专项 | ✅ 完成 |
 | P7 | AI 测试用例生成（需求里的扩展目标） | ⬜ 待做 |
 
-**全部功能已实现并验证**：后端 38 个接口、前端 20+ 页面、两套测试共 518 个用例（JUnit 289 + pytest 229）。
+**全部功能已实现并验证**：后端 **50** 个接口、前端 20+ 页面、两套测试共 **539** 个用例
+（JUnit 291 + pytest 248），另加前端浏览器回归 **12** 项断言，**当前 0 失败**。
+最近一次执行结果见 [`docs/testing/TEST_EXECUTION_REPORT.md`](docs/testing/TEST_EXECUTION_REPORT.md)。
+2026-09-14 全链路 Bug Hunt 的结论与证据链见
+[`docs/testing/bug_report.md`](docs/testing/bug_report.md)（4 个 P2 缺陷已修，1 个证伪）。
 
 > 私信采用 **REST + 轮询**，未引入 WebSocket（需求明确"不要因为追求技术而导致项目复杂化"）。
 > 前端导航栏角标 15 秒轮询一次，聊天页打开时 3 秒轮询一次。

@@ -1,4 +1,4 @@
-2026-09-12 10:34:37.743 [main] ERROR o.s.b.d.LoggingFailureAnalysisReporter - 
+2026-09-14 16:13:55.936 [main] ERROR o.s.b.d.LoggingFailureAnalysisReporter - 
 
 ***************************
 APPLICATION FAILED TO START
@@ -11,4 +11,132 @@ Web server failed to start. Port 8081 was already in use.
 Action:
 
 Identify and stop the process that's listening on port 8081 or configure this application to listen on another port.
+
+2026-09-14 21:11:58.399 [main] ERROR com.miqu.MiquApplication - 
+============================================================
+ 启动失败：无法连接数据库
+------------------------------------------------------------
+ 当前配置
+   地址    jdbc:mysql://localhost:3306/miqu?serverTimezone=Asia/Shanghai&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true
+   用户名  root
+ 失败原因
+   Access denied for user 'root'@'localhost' (using password: YES)
+------------------------------------------------------------
+ 请依次检查
+
+ 1) MySQL 是否已启动
+
+ 2) 是否提供了数据库口令。
+    项目**不把密码写进配置文件**，需通过环境变量传入：
+
+      Git Bash    export DB_USERNAME=root DB_PASSWORD=你的密码
+      PowerShell  $env:DB_USERNAME="root"; $env:DB_PASSWORD="你的密码"
+      CMD         set DB_USERNAME=root && set DB_PASSWORD=你的密码
+
+    然后重新启动后端。
+
+ 3) 数据库是否已初始化：
+
+      mysql -u root -p < database/schema.sql
+      mysql -u root -p < database/data.sql
+
+ 其他连接参数（换机器时可能需要）：
+   DB_HOST（默认 localhost）· DB_PORT（默认 3306）· DB_NAME（默认 miqu）
+============================================================
+
+2026-09-14 21:12:16.015 [main] ERROR com.miqu.MiquApplication - 
+============================================================
+ 启动失败：无法连接数据库
+------------------------------------------------------------
+ 当前配置
+   地址    jdbc:mysql://localhost:3306/miqu?serverTimezone=Asia/Shanghai&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true
+   用户名  root
+ 失败原因
+   Access denied for user 'root'@'localhost' (using password: YES)
+------------------------------------------------------------
+ 请依次检查
+
+ 1) MySQL 是否已启动
+
+ 2) 是否提供了数据库口令。
+    项目**不把密码写进配置文件**，需通过环境变量传入：
+
+      Git Bash    export DB_USERNAME=root DB_PASSWORD=你的密码
+      PowerShell  $env:DB_USERNAME="root"; $env:DB_PASSWORD="你的密码"
+      CMD         set DB_USERNAME=root && set DB_PASSWORD=你的密码
+
+    然后重新启动后端。
+
+ 3) 数据库是否已初始化：
+
+      mysql -u root -p < database/schema.sql
+      mysql -u root -p < database/data.sql
+
+ 其他连接参数（换机器时可能需要）：
+   DB_HOST（默认 localhost）· DB_PORT（默认 3306）· DB_NAME（默认 miqu）
+============================================================
+
+2026-09-14 21:12:59.165 [main] ERROR com.miqu.MiquApplication - 
+============================================================
+ 启动失败：无法连接数据库
+------------------------------------------------------------
+ 当前配置
+   地址    jdbc:mysql://localhost:3306/miqu?serverTimezone=Asia/Shanghai&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true
+   用户名  root
+ 失败原因
+   Access denied for user 'root'@'localhost' (using password: NO)
+------------------------------------------------------------
+ 请依次检查
+
+ 1) MySQL 是否已启动
+
+ 2) 是否提供了数据库口令。
+    项目**不把密码写进配置文件**，需通过环境变量传入：
+
+      Git Bash    export DB_USERNAME=root DB_PASSWORD=你的密码
+      PowerShell  $env:DB_USERNAME="root"; $env:DB_PASSWORD="你的密码"
+      CMD         set DB_USERNAME=root && set DB_PASSWORD=你的密码
+
+    然后重新启动后端。
+
+ 3) 数据库是否已初始化：
+
+      mysql -u root -p < database/schema.sql
+      mysql -u root -p < database/data.sql
+
+ 其他连接参数（换机器时可能需要）：
+   DB_HOST（默认 localhost）· DB_PORT（默认 3306）· DB_NAME（默认 miqu）
+============================================================
+
+2026-09-14 21:15:15.014 [main] ERROR com.miqu.MiquApplication - 
+============================================================
+ 启动失败：无法连接数据库
+------------------------------------------------------------
+ 当前配置
+   地址    jdbc:mysql://localhost:3306/miqu?serverTimezone=Asia/Shanghai&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true
+   用户名  root
+ 失败原因
+   Access denied for user 'root'@'localhost' (using password: YES)
+------------------------------------------------------------
+ 请依次检查
+
+ 1) MySQL 是否已启动
+
+ 2) 是否提供了数据库口令。
+    项目**不把密码写进配置文件**，需通过环境变量传入：
+
+      Git Bash    export DB_USERNAME=root DB_PASSWORD=你的密码
+      PowerShell  $env:DB_USERNAME="root"; $env:DB_PASSWORD="你的密码"
+      CMD         set DB_USERNAME=root && set DB_PASSWORD=你的密码
+
+    然后重新启动后端。
+
+ 3) 数据库是否已初始化：
+
+      mysql -u root -p < database/schema.sql
+      mysql -u root -p < database/data.sql
+
+ 其他连接参数（换机器时可能需要）：
+   DB_HOST（默认 localhost）· DB_PORT（默认 3306）· DB_NAME（默认 miqu）
+============================================================
 

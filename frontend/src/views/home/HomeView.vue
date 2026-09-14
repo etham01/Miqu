@@ -19,17 +19,32 @@ const total = ref(0)
 const hasNext = ref(false)
 const loading = ref(false)
 
+/**
+ * 请求序号。
+ *
+ * 「加载更多」的重复点击要靠 loading 挡住，但**切换 tab** 是用户主动发起的新查询，
+ * 不能因为上一个请求还在飞就把它丢掉——否则会出现"标签已经变成『我的关注』，
+ * 列表里还是最新动态"的错位（两类数据来自不同接口，视觉上却无法区分）。
+ *
+ * 所以：reset=true 时即使正在 loading 也照发，改用序号把**过期响应**丢弃。
+ */
+let requestSeq = 0
+
 async function load(reset = false) {
-  if (loading.value) return
+  if (loading.value && !reset) return
+  const seq = ++requestSeq
+  if (reset) page.value = 1
   loading.value = true
   try {
-    if (reset) page.value = 1
     const result = await postApi.list(tab.value, page.value, size)
+    // 已有更新的请求发出，本次响应已过期，直接丢弃，避免覆盖新数据
+    if (seq !== requestSeq) return
     posts.value = reset ? result.list : [...posts.value, ...result.list]
     total.value = result.total
     hasNext.value = result.hasNext
   } finally {
-    loading.value = false
+    // 只有最后一次请求才有资格复位 loading，否则会把新请求的转圈提前关掉
+    if (seq === requestSeq) loading.value = false
   }
 }
 

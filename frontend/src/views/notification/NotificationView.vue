@@ -44,21 +44,32 @@ function describe(item: Notification): string {
   }
 }
 
+/**
+ * 请求序号。
+ *
+ * 「加载更多」的重复点击靠 loading 挡住，但**切换通知类型**是用户主动发起的新查询：
+ * 若因上一个请求还在飞就丢掉它，就会出现"高亮是『点赞』、列表里却混着『关注』"的错位。
+ * 因此 reset=true 时照发，改用序号丢弃**过期响应**。
+ */
+let requestSeq = 0
+
 async function load(reset = true) {
-  if (loading.value) return
+  if (loading.value && !reset) return
+  const seq = ++requestSeq
+  if (reset) page.value = 1
   loading.value = true
   try {
-    if (reset) page.value = 1
     const result = await notificationApi.list({
       type: typeParam.value,
       page: page.value,
       size,
     })
+    if (seq !== requestSeq) return
     list.value = reset ? result.list : [...list.value, ...result.list]
     total.value = result.total
     hasNext.value = result.hasNext
   } finally {
-    loading.value = false
+    if (seq === requestSeq) loading.value = false
   }
 }
 

@@ -18,25 +18,39 @@ const size = 10
 const total = ref(0)
 const hasNext = ref(false)
 
+/**
+ * 请求序号。
+ *
+ * 「加载更多」的重复点击靠 loading 挡住，但**换关键词**是用户主动发起的新查询：
+ * 若因上一个请求还在飞就丢掉它，就会出现"地址栏已经换了关键词、结果还是上一个"的错位。
+ * 因此 reset=true 时照发，改用序号丢弃**过期响应**。
+ */
+let requestSeq = 0
+
 async function search(reset = true) {
   const value = keyword.value.trim()
   if (!value) {
+    // 清空关键词同样是一次"新查询"：让在飞的旧请求失效，
+    // 否则旧响应回来会把已经清空的列表重新填上。
+    requestSeq++
     results.value = []
     searched.value = false
     return
   }
 
-  if (loading.value) return
+  if (loading.value && !reset) return
+  const seq = ++requestSeq
+  if (reset) page.value = 1
   loading.value = true
   try {
-    if (reset) page.value = 1
     const result = await userApi.search(value, page.value, size)
+    if (seq !== requestSeq) return
     results.value = reset ? result.list : [...results.value, ...result.list]
     total.value = result.total
     hasNext.value = result.hasNext
     searched.value = true
   } finally {
-    loading.value = false
+    if (seq === requestSeq) loading.value = false
   }
 }
 

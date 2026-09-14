@@ -173,6 +173,47 @@ def test_update_avatar_blank(fresh_user):
     assert response.message == "头像地址不能为空"
 
 
+@pytest.mark.write
+def test_update_avatar_rejects_external_url(fresh_user):
+    """BUG-005 回归：头像只接受本项目上传接口返回的地址。
+
+    与发布动态的图片校验对称（对照 test_post.py 的外链图片用例）。
+    此前只校验了非空与长度，任意外链都能写进头像——服务器就成了别人的图床，
+    违规头像也无从审核。
+    """
+    client = fresh_user()
+    before = client.get("/api/users/me").data["avatar"]
+
+    response = client.put(
+        "/api/users/me/avatar",
+        json_body={"avatar": "https://evil.example.com/track.png"},
+    )
+
+    assert response.code == 400
+    assert response.message == "图片地址不合法，请先通过上传接口获取"
+    # 被拒绝的写入不能产生任何副作用
+    assert client.get("/api/users/me").data["avatar"] == before
+
+
+@pytest.mark.write
+def test_update_avatar_rejects_lookalike_prefix(fresh_user):
+    """前缀必须带 "/"，否则 "/uploads-evil/a.png" 这类近似串会蒙混过关。
+
+    与动态图片校验同款边界（见 test_post.py）。
+    """
+    client = fresh_user()
+    before = client.get("/api/users/me").data["avatar"]
+
+    response = client.put(
+        "/api/users/me/avatar",
+        json_body={"avatar": "/uploads-evil/a.png"},
+    )
+
+    assert response.code == 400
+    assert response.message == "图片地址不合法，请先通过上传接口获取"
+    assert client.get("/api/users/me").data["avatar"] == before
+
+
 # ==================== 白名单边界 ====================
 
 

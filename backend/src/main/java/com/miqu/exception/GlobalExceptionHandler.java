@@ -11,6 +11,7 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.BindException;
 import org.springframework.validation.FieldError;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
@@ -18,6 +19,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.support.MissingServletRequestPartException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.stream.Collectors;
@@ -144,6 +146,18 @@ public class GlobalExceptionHandler {
         return Result.fail(405, "请求方法不支持：" + e.getMethod());
     }
 
+    /**
+     * 请求的 Content-Type 与接口声明的不一致。
+     *
+     * <p>典型场景：`POST /api/files/image` 只接受 multipart，客户端却发了
+     * `application/x-www-form-urlencoded`。这属于**客户端请求错误**，
+     * 不落到兜底分支返回 500 —— 否则接口测试无法区分"服务端炸了"和"请求发错了"。
+     */
+    @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
+    public Result<Void> handleMediaTypeNotSupported(HttpMediaTypeNotSupportedException e) {
+        return Result.fail(ErrorCode.PARAM_INVALID, "不支持的请求类型：" + e.getContentType());
+    }
+
     /** 静态资源或接口路径不存在。 */
     @ExceptionHandler(NoResourceFoundException.class)
     public Result<Void> handleNoResource(NoResourceFoundException e) {
@@ -153,6 +167,19 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(MaxUploadSizeExceededException.class)
     public Result<Void> handleMaxUploadSize(MaxUploadSizeExceededException e) {
         return Result.fail(ErrorCode.FILE_TOO_LARGE);
+    }
+
+    /**
+     * multipart 请求里缺少接口声明的 part（如 `POST /api/files/image` 没带 `file` 字段）。
+     *
+     * <p>注意它**不是** {@link MissingServletRequestParameterException}：
+     * `@RequestParam MultipartFile` 由 Multipart 解析器处理，缺字段时抛的是
+     * `MissingServletRequestPartException`，父类为 ServletException，
+     * 不额外登记就会掉进兜底分支变成 500。
+     */
+    @ExceptionHandler(MissingServletRequestPartException.class)
+    public Result<Void> handleMissingPart(MissingServletRequestPartException e) {
+        return Result.fail(ErrorCode.PARAM_INVALID, "缺少必要参数：" + e.getRequestPartName());
     }
 
     // ================== 兜底 ==================

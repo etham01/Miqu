@@ -1,0 +1,579 @@
+# Miqu 安全与并发用例
+#
+# 登记标准：安全边界（越权 / 注入 / 上传）与破坏性场景（并发、重复提交、前端 UI 竞态）。
+# pytest 字段是**指针**（唯一真相在 tests/），不是副本；
+# 前端用例用 browser 字段指向 tests/browser_regression.mjs。
+# 字段定义见 ../docs/testing/TEST_CASE_SCHEMA.md
+
+meta:
+  module: security / file / concurrency / ui_race
+  last_verified: 2026-09-14
+  pytest_baseline: "248 passed / 0 failed"
+  browser_baseline: "12 passed / 0 failed"
+
+# ============================================================
+# 一、认证与越权（SEC）
+# 认证策略是「失败关闭」：不登记在 miqu.auth.white-list 里的 /api/** 一律要求登录。
+# ============================================================
+
+security_rules:
+
+  - id: SEC-001
+    title: 未登录访问受保护接口返回 401
+    priority: P0
+    type: security
+    rule: 白名单"失败关闭"——不登记即受保护
+    frozen_at: 2026-09-11
+    preconditions: [不携带 Token]
+    steps:
+      - 调用任一受保护的写接口（关注 / 发动态 / 发私信 / 上传）
+    expected:
+      code: 401
+    pytest: api/test_conversation_mutual_follow.py::test_open_conversation_requires_login
+    status: implemented
+    note: 各模块均有对应的 requires_login 用例，合计十余条。
+
+  - id: SEC-002
+    title: 账号被禁用后旧 Token 立即失效
+    priority: P0
+    type: security
+    rule: JwtAuthenticationFilter 每请求查库校验用户状态，而非只验签名
+    frozen_at: 2026-09-11
+    preconditions:
+      - 存在一个已登录用户
+      - 管理员将其禁用
+    steps:
+      - 该用户用**旧 Token** 继续访问受保护接口
+    expected:
+      code: 423
+    pytest: api/test_auth.py::test_me_returns_403_after_account_disabled
+    status: implemented
+    note: JUnit 侧同在 AuthControllerTest / AdminUserControllerTest 覆盖；这是"只验 JWT 签名"方案的经典漏洞。
+
+  - id: SEC-003
+    title: 不能越权修改用户名 / 邮箱 / 角色
+    priority: P0
+    type: security
+    preconditions: [A 已登录]
+    steps:
+      - A 调用 PUT /api/users/me，body 中带上 username / email / role
+    expected:
+      code: 200
+      effect: 只有昵称、简介等白名单字段被修改；username / email / role 不变
+    pytest: api/test_user.py::test_update_profile_does_not_change_username_or_email
+    status: implemented
+
+  - id: SEC-004
+    title: 不能禁用管理员账号
+    priority: P1
+    type: security
+    rule: 校验顺序 —— 不能操作自己(400) 先于 目标若是管理员(403)
+    frozen_at: 2026-09-11
+    preconditions: [管理员 A；目标用户是管理员]
+    steps: [A 尝试禁用另一个管理员]
+    expected:
+      code: 403
+      message: 不能禁用管理员账号
+    pytest: null
+    status: gap
+    gap_reason: |
+      种子数据里只有 admin 一个管理员，而管理员无法把自己作为禁用目标
+      （"不能操作自己"先命中），因此第 2 条校验没有任何 HTTP 输入能走到。
+      要覆盖需在 data.sql 补第二个管理员，或写直接改库的集成测试。
+      test_admin.py 中 test_disable_self_is_blocked_before_admin_guard 的注释有完整说明。
+      这里**不假装覆盖**。
+
+  - id: SEC-005
+    title: 后台接口访问控制矩阵（11 接口 × 未登录 / 非管理员 / 管理员）
+    priority: P0
+    type: security
+    frozen_at: 2026-09-11
+    preconditions: [三种身份客户端]
+    steps:
+      - 未登录访问 11 个后台接口 → 期望 401
+      - 普通用户访问 → 期望 403
+      - 管理员访问 → 期望 200
+    expected:
+      code: 200
+    pytest: api/test_admin.py::test_admin_endpoints_require_login
+    status: implemented
+    note: JUnit 侧为 AdminAccessControlTest（4 个 @Test 内含循环断言）。
+
+  - id: SEC-006
+    title: 搜索关键词的 LIKE 通配符被转义
+    priority: P0
+    type: security
+    rule: 用户输入的 % _ \ 必须转义，否则可被用来枚举全量数据
+    frozen_at: 2026-09-11
+    steps:
+      - 搜索关键词 "%" / "_" / "\"
+    expected:
+      effect: 不会被当作通配符匹配全表
+    pytest: api/test_search.py::test_percent_is_escaped
+    status: implemented
+
+  - id: SEC-007
+    title: 动态图片只接受本站上传的 URL
+    priority: P1
+    type: security
+    rule: 图片 URL 必须带 /uploads/ 前缀，拒绝外链（防 SSRF / 防盗链搬运）
+    frozen_at: 2026-09-11
+    steps:
+      - 发布动态，images 中使用外部 URL
+    expected:
+      code: 400
+      message: 图片地址不合法，请先通过上传接口获取
+    pytest: api/test_post.py::test_create_post_rejects_external_image_url
+    status: implemented
+
+  - id: SEC-008
+    title: 不能操作他人的通知
+    priority: P1
+    type: security
+    rule: 通知按接收者隔离
+    frozen_at: 2026-09-11
+    steps: [A 尝试把 B 的通知标记为已读]
+    expected:
+      code: 403
+    pytest: api/test_notification.py::test_cannot_mark_others_notification
+    status: implemented
+
+  - id: SEC-009
+    title: 不能删除他人发布的动态
+    priority: P1
+    type: security
+    frozen_at: 2026-09-11
+    steps: [B 删除 A 的动态]
+    expected:
+      code: 403
+    pytest: api/test_post.py::test_delete_others_post_is_forbidden
+    status: implemented
+
+  - id: SEC-010
+    title: 不能删除他人的评论
+    priority: P1
+    type: security
+    frozen_at: 2026-09-11
+    steps: [B 删除 A 的评论]
+    expected:
+      code: 403
+    pytest: api/test_comment.py::test_delete_others_comment_is_forbidden
+    status: implemented
+
+  - id: SEC-011
+    title: 头像 URL 也校验 /uploads/ 前缀
+    priority: P2
+    type: security
+    rule: 与动态图片校验保持对称（BUG-005 已修复）
+    frozen_at: null
+    preconditions: [A 已登录]
+    steps: [PUT /api/users/me/avatar，avatar 传外部 URL]
+    expected:
+      code: 400
+      message: 图片地址不合法，请先通过上传接口获取
+      effect: 头像不被改动（拒绝的写入无副作用）
+    pytest: api/test_user.py::test_update_avatar_rejects_external_url
+    status: implemented
+    history: |
+      2026-09-14 之前为 gap（只校验非空与长度，任意外链可写入）。
+      本次 Bug Hunt 用 API 探针实证复现后修复：UserServiceImpl.updateAvatar
+      复用与 PostServiceImpl.validateImageUrls 一致的前缀校验。
+      同批新增的近似串边界见 api/test_user.py::test_update_avatar_rejects_lookalike_prefix
+      （JUnit 侧对应 UserControllerTest#updateAvatar_externalUrl_rejected /
+      #updateAvatar_lookalikePrefix_rejected）。
+
+      遗留说明（不影响本规则，但需知情）：data.sql 里 21 个种子用户的头像
+      仍是外部图床 https://i.pravatar.cc/...。本校验只作用于**写入**，
+      存量行不受影响；因此"文档要求相对路径、种子却是外链"这处不一致依然存在，
+      属数据侧的既有问题，不在接口校验范围内。
+
+# ============================================================
+# 二、文件上传安全（FILE）
+# 核心策略：按文件头**魔数**判定真实类型，不看后缀名与 Content-Type；
+# 存储用 UUID 重命名，不使用原始文件名。
+# ============================================================
+
+file_rules:
+
+  - id: FILE-001
+    title: 支持 png / jpg / gif / webp 四种格式
+    priority: P1
+    type: smoke
+    preconditions: [A 已登录；构造带正确魔数的最小文件]
+    steps: [分别上传四种格式]
+    expected:
+      code: 200
+      effect: 返回 /uploads/ 下的 URL
+    pytest: api/test_file.py::test_upload_supported_image_types
+    status: implemented
+
+  - id: FILE-002
+    title: 上传后返回的 URL 可以真的取到内容
+    priority: P1
+    type: smoke
+    rule: 上传 → 校验 → 访问 必须闭环
+    preconditions: [刚上传成功]
+    steps: [GET 返回的 URL]
+    expected:
+      code: 200
+      effect: Content-Type 为 image/*，内容长度与上传一致
+    pytest: api/test_file.py::test_uploaded_file_is_reachable
+    status: implemented
+
+  - id: FILE-003
+    title: 空文件被拒绝
+    priority: P1
+    type: security
+    preconditions: [上传 0 字节文件]
+    steps: [POST /api/files/image]
+    expected:
+      code: 400
+      message: 上传文件不能为空
+    pytest: api/test_file.py::test_empty_file_is_rejected
+    status: implemented
+
+  - id: FILE-004
+    title: 超过 5MB 被拒绝
+    priority: P0
+    type: security
+    rule: MAX_IMAGE_SIZE = 5MB
+    preconditions: [构造 5MB + 1 字节的 png]
+    steps: [上传]
+    expected:
+      code: 400
+      message: 图片大小不能超过 5MB
+    pytest: api/test_file.py::test_oversize_file_is_rejected
+    status: implemented
+
+  - id: FILE-005
+    title: 伪装后缀被拒绝（魔数校验）
+    priority: P0
+    type: security
+    rule: 把脚本改名为 .jpg 不能绕过后缀校验，因为根本不看后缀
+    preconditions: [纯文本命名为 shell.jpg，Content-Type 声明 image/jpeg]
+    steps: [上传]
+    expected:
+      code: 400
+      message: 仅支持 jpg / png / gif / webp 格式的图片
+    pytest: api/test_file.py::test_disguised_extension_is_rejected
+    status: implemented
+
+  - id: FILE-006
+    title: MIME 声明与实际内容不符被拒绝
+    priority: P0
+    type: security
+    rule: 校验依据是**内容**，不是客户端可任意伪造的 MIME
+    preconditions: [内容为文本，Content-Type 声明 image/png]
+    steps: [上传]
+    expected:
+      code: 400
+    pytest: api/test_file.py::test_mime_type_lies_about_content
+    status: implemented
+
+  - id: FILE-007
+    title: 极小文件（< 12 字节）被拒绝
+    priority: P2
+    type: boundary
+    rule: 魔数判定要求 length >= 12
+    preconditions: [2 字节文件]
+    steps: [上传]
+    expected:
+      code: 400
+    pytest: api/test_file.py::test_tiny_file_is_rejected
+    status: implemented
+
+  - id: FILE-008
+    title: 真图 + 错误后缀应当放行（反向用例）
+    priority: P2
+    type: boundary
+    rule: 既然按内容判定，就不该被错误后缀连累
+    preconditions: [内容是真 PNG，文件名 photo.txt，Content-Type text/plain]
+    steps: [上传]
+    expected:
+      code: 200
+      effect: 落的扩展名按真实内容推导为 .png
+    pytest: api/test_file.py::test_real_image_with_wrong_extension_is_accepted
+    status: implemented
+
+  - id: FILE-009
+    title: 存储文件名必须与原始文件名无关
+    priority: P0
+    type: security
+    rule: UUID 重命名，杜绝 ../../ 路径穿越与覆盖
+    preconditions: [上传任意图片]
+    steps: [检查返回 URL 的文件名]
+    expected:
+      effect: 文件名为 32 位十六进制 + 扩展名，不等于原始文件名
+    pytest: api/test_file.py::test_upload_supported_image_types
+    status: implemented
+
+  - id: FILE-010
+    title: 未登录不能上传
+    priority: P0
+    type: security
+    preconditions: [不携带 Token]
+    steps: [POST /api/files/image]
+    expected:
+      code: 401
+    pytest: api/test_file.py::test_upload_requires_login
+    status: implemented
+
+  - id: FILE-011
+    title: multipart 缺少 file 字段 → 400（而非 500）
+    priority: P1
+    type: security
+    preconditions: [multipart 请求中不含 file part]
+    steps: [POST /api/files/image]
+    expected:
+      code: 400
+      message: 缺少必要参数：file
+    pytest: api/test_file.py::test_upload_missing_file_param
+    status: implemented
+    note: |
+      2026-09-14 修复。原实现抛 MissingServletRequestPartException（ServletException 子类）
+      无人接管，落到 Exception 兜底分支返回 500，接口测试无法区分"服务端炸了"和"请求发错了"。
+
+  - id: FILE-012
+    title: 非 multipart 请求 → 400（而非 500）
+    priority: P1
+    type: security
+    preconditions: [Content-Type 为 application/x-www-form-urlencoded]
+    steps: [POST /api/files/image]
+    expected:
+      code: 400
+      message: 不支持的请求类型：application/x-www-form-urlencoded
+    pytest: api/test_file.py::test_upload_wrong_content_type
+    status: implemented
+    note: 2026-09-14 修复。原为 500（HttpMediaTypeNotSupportedException 无 handler）。
+
+# ============================================================
+# 三、并发（CONC）
+# 共同主题：Service 层"先查再插"只是快速失败，
+# 真正拦住重复数据的是**数据库唯一键**，冲突由 GlobalExceptionHandler 翻译成 409。
+# ============================================================
+
+concurrency_rules:
+
+  - id: CONC-001
+    title: 同一用户名并发注册只成功一次
+    priority: P0
+    type: concurrency
+    rule: uk_username 唯一键兜底
+    frozen_at: 2026-09-11
+    preconditions: [8 个线程同一时刻注册同一用户名]
+    steps: [Barrier 对齐后并发 POST /api/auth/register]
+    expected:
+      code: 409
+      effect: 恰好 1 个 200，其余全部 409；库中只有一条用户记录
+    pytest: api/test_concurrency.py::test_concurrent_duplicate_registration
+    status: implemented
+
+  - id: CONC-002
+    title: 并发重复关注只写入一行
+    priority: P0
+    type: concurrency
+    rule: uk_follower_following 唯一键兜底
+    frozen_at: 2026-09-11
+    preconditions: [8 线程同一用户并发关注同一目标]
+    steps: [并发 POST /api/users/{id}/follow]
+    expected:
+      code: 409
+      effect: 恰好 1 个 200；follow 表恰好 1 行；粉丝数与关注数都只 +1
+    pytest: api/test_concurrency.py::test_concurrent_duplicate_follow
+    status: implemented
+
+  - id: CONC-003
+    title: 并发取消关注恰好成功一次
+    priority: P1
+    type: concurrency
+    frozen_at: 2026-09-11
+    preconditions: [已关注，8 线程并发取消]
+    steps: [并发 DELETE /api/users/{id}/follow]
+    expected:
+      code: 404
+      effect: 恰好 1 个 200，其余 404；粉丝数归 0
+    pytest: api/test_concurrency.py::test_concurrent_unfollow
+    status: implemented
+
+  - id: CONC-004
+    title: 并发重复点赞只写入一行
+    priority: P0
+    type: concurrency
+    rule: uk_post_user 唯一键兜底；like_count 是冗余计数，必须与关系表一致
+    frozen_at: 2026-09-11
+    preconditions: [8 线程同一用户并发点赞同一条动态]
+    steps: [并发 POST /api/posts/{id}/like]
+    expected:
+      code: 409
+      effect: 恰好 1 个 200；likeCount 只 +1
+    pytest: api/test_concurrency.py::test_concurrent_duplicate_like
+    status: implemented
+
+  - id: CONC-005
+    title: 并发创建同一会话收敛为同一条
+    priority: P0
+    type: concurrency
+    rule: uk_users 唯一键 + 捕获冲突后在新事务中重查
+    frozen_at: 2026-09-11
+    preconditions: [A、B 互关；8 线程并发建会话]
+    steps: [并发 POST /api/conversations]
+    expected:
+      code: 200
+      effect: 全部成功，且返回的会话 id 唯一
+    pytest: api/test_concurrency.py::test_concurrent_create_conversation
+    status: implemented
+    note: |
+      【2026-09-14 修复的缺陷】原实现在**同一事务**内用普通 SELECT 重查，
+      但 MySQL REPEATABLE READ 的一致性读快照在更早的查用户时就已建立，
+      看不到并发事务刚提交的会话 → 重查仍为 null → 上抛 409。
+      实测 8 并发首发消息有 4 条被 409 拒掉。
+      期间尝试过 SELECT ... FOR UPDATE（当前读），结果 8 个事务在同一 gap
+      上加锁**直接死锁**。
+      最终改为用 REQUIRES_NEW 开新事务重查（新事务有全新 read view）。
+
+  - id: CONC-006
+    title: 并发发送消息不丢消息
+    priority: P0
+    type: concurrency
+    frozen_at: 2026-09-11
+    preconditions: [A、B 互关；8 线程并发发消息]
+    steps: [并发 POST /api/messages]
+    expected:
+      code: 200
+      effect: 全部成功；消息条数 = 接收方未读数 = 成功请求数 = 8
+    pytest: api/test_concurrency.py::test_concurrent_send_message
+    status: implemented
+
+  - id: CONC-007
+    title: 数十线程同一瞬间首建会话
+    priority: P2
+    type: concurrency
+    frozen_at: null
+    preconditions: [32 线程并发构建同一会话]
+    steps: [并发 POST /api/conversations]
+    expected:
+      code: 200
+      effect: 不产生第二条会话
+    pytest: null
+    status: gap
+    gap_reason: |
+      属压测范畴。本次只验证到 8 线程（通过）。
+      更高并发的行为未验证，不做推测性断言。
+
+# ============================================================
+# 三、前端状态一致性（UI 竞态）
+#
+# 根因是同一个写法：用 `if (loading.value) return` 同时处理
+# 「加载更多的去重」和「用户主动切换筛选条件的新查询」，
+# 导致筛选条件先变、取数请求被静默丢弃 → **标签与实际数据不一致**。
+#
+# 为什么不用 pytest：后端每次返回都是对的，请求根本没发出去；
+# pytest 打 HTTP 验证不到这一层。这些用例在真实 Chrome 里跑，
+# 因此用 browser 指针（见 docs/testing/TEST_CASE_SCHEMA.md §5）。
+#
+# 复现手法：把首屏请求人为延迟，把"还在飞就点了下一个筛选条件"的窗口稳定放大。
+# 跑法：起后端 8081 与前端 5173 后
+#       NO_PROXY=localhost,127.0.0.1 node tests/browser_regression.mjs
+# ============================================================
+
+ui_race_rules:
+
+  - id: CONC-008
+    title: 切换首页 tab 后，标签与列表数据必须一致
+    priority: P2
+    type: ui_state_race
+    rule: 用户切换筛选条件后，必须为该条件重新取数（BUG-002 已修复）
+    frozen_at: 2026-09-14
+    preconditions:
+      - A 已登录且只关注了 B（关注流恰好 1 条）
+      - 首屏 latest 请求被人为延迟
+    steps:
+      - 打开首页，在首屏请求返回前点击「我的关注」
+    expected:
+      code: 200
+      effect: |
+        高亮为「我的关注」；发出 tab=following 请求；
+        渲染条数 == 关注流真实条数（不得把最新动态当关注流展示）
+    pytest: null
+    browser: browser_regression.mjs::BUG-002
+    status: implemented
+    history: |
+      2026-09-14 修复前实测：高亮=「我的关注」，请求只有 tab=latest，渲染 10 条
+      （关注流应为 1 条），其中 9 条来自 A 未关注的用户。
+      修复：HomeView.load() 引入请求序号，reset=true 时照发，只丢弃过期响应。
+
+  - id: CONC-009
+    title: 换搜索关键词后，地址栏 / 输入框 / 结果三者必须一致
+    priority: P2
+    type: ui_state_race
+    rule: 换关键词是新查询，不得因为上一个请求还在飞就丢弃（BUG-003 已修复）
+    frozen_at: 2026-09-14
+    preconditions:
+      - 首次搜索请求被人为延迟
+    steps:
+      - 输入能搜到的关键词 A 并回车
+      - 在请求返回前把关键词改成必定搜不到的 B 再回车
+    expected:
+      code: 200
+      effect: |
+        重新发起搜索请求（第二个请求携带 B）；
+        页面提示「没有找到与「B」相关的用户」；
+        清空关键词后，在飞的旧响应不得把已清空的列表重新填上
+    pytest: null
+    browser: browser_regression.mjs::BUG-003
+    status: implemented
+    history: |
+      2026-09-14 修复前实测：只发出 1 次请求（关键词 A），
+      但地址栏与输入框已是 B —— URL 与结果不一致，刷新后结果会变。
+      修复：SearchView.search() 同款请求序号；并让"清空关键词"同样使在飞请求失效。
+
+  - id: CONC-010
+    title: 切换通知类型筛选后，标签与列表数据必须一致
+    priority: P2
+    type: ui_state_race
+    rule: 切类型要重新取数（BUG-004 已修复）
+    frozen_at: 2026-09-14
+    preconditions:
+      - A 同时有「关注」与「点赞」两类未读通知
+      - 首屏「全部」请求被人为延迟
+    steps:
+      - 打开通知页，在请求返回前点击「点赞」标签
+    expected:
+      code: 200
+      effect: 补发带 type=2 的请求；列表中不得再出现「关注了你」
+    pytest: null
+    browser: browser_regression.mjs::BUG-004
+    status: implemented
+    history: |
+      2026-09-14 修复前实测：高亮「点赞」，只发出 ?page=1&size=20（无 type=2），
+      列表里混着「关注了你」—— 筛选器形同虚设。
+      修复：NotificationView.load() 同款请求序号。
+
+  - id: CONC-011
+    title: 取消关注后，对方动态必须立刻从「我的关注」消失
+    priority: P2
+    type: ui_state_race
+    rule: |
+      「关注动态」定义为**当前有效关注关系**（docs/design.md L485）。
+      本用例是 BUG-001 的固定回归守卫：该现象经五路交叉验证为**未复现**（NOT_A_BUG），
+      行为本来就是对的，登记它是为了防止将来被改坏。
+    frozen_at: 2026-09-14
+    preconditions:
+      - A 关注 B，B 已发布动态
+    steps:
+      - A 查看「我的关注」，确认能看到 B 的动态
+      - A 进入 B 主页取消关注
+      - A 回首页再次查看「我的关注」
+    expected:
+      code: 200
+      effect: |
+        followedByMe=false；
+        切到「我的关注」时确实重新请求 tab=following；
+        B 的动态不再出现（硬刷新后同样不出现）
+    pytest: null
+    browser: browser_regression.mjs::BUG-001
+    status: implemented
+    history: |
+      2026-09-14 Bug Hunt 首次登记。API + DB + 真实浏览器 + Code Review 四路证据
+      一致表明后端与前端行为都正确（详见 docs/testing/bug_report.md）。
+      固化为长期回归用例。

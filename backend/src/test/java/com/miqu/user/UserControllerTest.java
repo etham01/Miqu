@@ -201,6 +201,36 @@ class UserControllerTest extends BaseControllerTest {
                 .andExpect(jsonPath("$.message").value("头像地址不能为空"));
     }
 
+    @Test
+    @DisplayName("修改头像：外链地址 → 400（BUG-005 回归，与动态图片校验对称）")
+    void updateAvatar_externalUrl_rejected() throws Exception {
+        String token = login("test001", "123456");
+        String body = """
+                {"avatar":"https://evil.example.com/track.png"}
+                """;
+
+        mockMvc.perform(put(ME + "/avatar").header("Authorization", bearer(token))
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(400))
+                .andExpect(jsonPath("$.message").value("图片地址不合法，请先通过上传接口获取"));
+    }
+
+    @Test
+    @DisplayName("修改头像：前缀近似串 /uploads-evil/ → 400")
+    void updateAvatar_lookalikePrefix_rejected() throws Exception {
+        String token = login("test001", "123456");
+        String body = """
+                {"avatar":"/uploads-evil/a.png"}
+                """;
+
+        mockMvc.perform(put(ME + "/avatar").header("Authorization", bearer(token))
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(400))
+                .andExpect(jsonPath("$.message").value("图片地址不合法，请先通过上传接口获取"));
+    }
+
     // ==================== 修改密码 ====================
 
     @Test

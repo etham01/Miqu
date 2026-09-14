@@ -1,0 +1,1300 @@
+{
+  "total": 246,
+  "modules": {
+    "api/test_admin.py": {
+      "count": 53,
+      "tests": [
+        {
+          "name": "test_admin_endpoints_require_login[GET-/api/admin/stats]",
+          "base": "test_admin_endpoints_require_login",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_endpoints_require_login[GET-/api/admin/users]",
+          "base": "test_admin_endpoints_require_login",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_endpoints_require_login[GET-/api/admin/users/2]",
+          "base": "test_admin_endpoints_require_login",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_endpoints_require_login[GET-/api/admin/posts]",
+          "base": "test_admin_endpoints_require_login",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_endpoints_require_login[GET-/api/admin/comments]",
+          "base": "test_admin_endpoints_require_login",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_endpoints_require_login[GET-/api/admin/reports]",
+          "base": "test_admin_endpoints_require_login",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_endpoints_require_login[GET-/api/admin/logs]",
+          "base": "test_admin_endpoints_require_login",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_endpoints_forbid_normal_user[GET-/api/admin/stats]",
+          "base": "test_admin_endpoints_forbid_normal_user",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_endpoints_forbid_normal_user[GET-/api/admin/users]",
+          "base": "test_admin_endpoints_forbid_normal_user",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_endpoints_forbid_normal_user[GET-/api/admin/users/2]",
+          "base": "test_admin_endpoints_forbid_normal_user",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_endpoints_forbid_normal_user[GET-/api/admin/posts]",
+          "base": "test_admin_endpoints_forbid_normal_user",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_endpoints_forbid_normal_user[GET-/api/admin/comments]",
+          "base": "test_admin_endpoints_forbid_normal_user",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_endpoints_forbid_normal_user[GET-/api/admin/reports]",
+          "base": "test_admin_endpoints_forbid_normal_user",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_endpoints_forbid_normal_user[GET-/api/admin/logs]",
+          "base": "test_admin_endpoints_forbid_normal_user",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_endpoints_allow_admin[GET-/api/admin/stats]",
+          "base": "test_admin_endpoints_allow_admin",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_endpoints_allow_admin[GET-/api/admin/users]",
+          "base": "test_admin_endpoints_allow_admin",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_endpoints_allow_admin[GET-/api/admin/users/2]",
+          "base": "test_admin_endpoints_allow_admin",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_endpoints_allow_admin[GET-/api/admin/posts]",
+          "base": "test_admin_endpoints_allow_admin",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_endpoints_allow_admin[GET-/api/admin/comments]",
+          "base": "test_admin_endpoints_allow_admin",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_endpoints_allow_admin[GET-/api/admin/reports]",
+          "base": "test_admin_endpoints_allow_admin",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_endpoints_allow_admin[GET-/api/admin/logs]",
+          "base": "test_admin_endpoints_allow_admin",
+          "doc": ""
+        },
+        {
+          "name": "test_401_and_403_have_distinct_messages",
+          "base": "test_401_and_403_have_distinct_messages",
+          "doc": "两种失败必须给出不同文案，前端才能判断该引导登录还是提示无权限。"
+        },
+        {
+          "name": "test_stats_shape",
+          "base": "test_stats_shape",
+          "doc": ""
+        },
+        {
+          "name": "test_stats_user_total_increments_after_register",
+          "base": "test_stats_user_total_increments_after_register",
+          "doc": ""
+        },
+        {
+          "name": "test_stats_post_total_decreases_after_delete",
+          "base": "test_stats_post_total_decreases_after_delete",
+          "doc": ""
+        },
+        {
+          "name": "test_user_list",
+          "base": "test_user_list",
+          "doc": ""
+        },
+        {
+          "name": "test_user_list_hides_deleted_user",
+          "base": "test_user_list_hides_deleted_user",
+          "doc": ""
+        },
+        {
+          "name": "test_user_list_filter_by_status",
+          "base": "test_user_list_filter_by_status",
+          "doc": ""
+        },
+        {
+          "name": "test_user_list_keyword_wildcard_is_escaped",
+          "base": "test_user_list_keyword_wildcard_is_escaped",
+          "doc": "后台搜索同样要转义 LIKE 通配符，否则搜 `%` 会返回全部用户。"
+        },
+        {
+          "name": "test_user_list_invalid_status",
+          "base": "test_user_list_invalid_status",
+          "doc": ""
+        },
+        {
+          "name": "test_disable_and_enable_user",
+          "base": "test_disable_and_enable_user",
+          "doc": ""
+        },
+        {
+          "name": "test_cannot_disable_self",
+          "base": "test_cannot_disable_self",
+          "doc": ""
+        },
+        {
+          "name": "test_disable_self_is_blocked_before_admin_guard",
+          "base": "test_disable_self_is_blocked_before_admin_guard",
+          "doc": "【已知覆盖缺口】\"不能禁用管理员账号\"这条分支在种子数据下无法通过 HTTP 触达。"
+        },
+        {
+          "name": "test_invalid_status_value",
+          "base": "test_invalid_status_value",
+          "doc": ""
+        },
+        {
+          "name": "test_user_detail_not_found",
+          "base": "test_user_detail_not_found",
+          "doc": ""
+        },
+        {
+          "name": "test_post_list",
+          "base": "test_post_list",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_delete_post",
+          "base": "test_admin_delete_post",
+          "doc": ""
+        },
+        {
+          "name": "test_comment_list",
+          "base": "test_comment_list",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_delete_comment",
+          "base": "test_admin_delete_comment",
+          "doc": ""
+        },
+        {
+          "name": "test_report_is_visible_in_admin_queue",
+          "base": "test_report_is_visible_in_admin_queue",
+          "doc": ""
+        },
+        {
+          "name": "test_report_list_has_target_preview",
+          "base": "test_report_list_has_target_preview",
+          "doc": "target_id 是多态外键，服务端要解析出被举报对象的摘要供后台展示。"
+        },
+        {
+          "name": "test_handle_report_with_delete_action",
+          "base": "test_handle_report_with_delete_action",
+          "doc": ""
+        },
+        {
+          "name": "test_handle_report_reject",
+          "base": "test_handle_report_reject",
+          "doc": ""
+        },
+        {
+          "name": "test_reject_with_action_is_rejected",
+          "base": "test_reject_with_action_is_rejected",
+          "doc": "既判定未违规又删内容自相矛盾。"
+        },
+        {
+          "name": "test_action_must_match_target_type",
+          "base": "test_action_must_match_target_type",
+          "doc": ""
+        },
+        {
+          "name": "test_invalid_report_action",
+          "base": "test_invalid_report_action",
+          "doc": ""
+        },
+        {
+          "name": "test_handle_report_twice_is_conflict",
+          "base": "test_handle_report_twice_is_conflict",
+          "doc": ""
+        },
+        {
+          "name": "test_handle_missing_report",
+          "base": "test_handle_missing_report",
+          "doc": ""
+        },
+        {
+          "name": "test_operation_logs",
+          "base": "test_operation_logs",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_action_writes_log",
+          "base": "test_admin_action_writes_log",
+          "doc": ""
+        },
+        {
+          "name": "test_operation_log_filter",
+          "base": "test_operation_log_filter",
+          "doc": ""
+        },
+        {
+          "name": "test_operation_log_has_no_secrets",
+          "base": "test_operation_log_has_no_secrets",
+          "doc": ""
+        },
+        {
+          "name": "test_disabled_seed_user_can_be_reenabled",
+          "base": "test_disabled_seed_user_can_be_reenabled",
+          "doc": "确认种子里的禁用账号状态可恢复，避免用例之间互相影响。"
+        }
+      ]
+    },
+    "api/test_auth.py": {
+      "count": 19,
+      "tests": [
+        {
+          "name": "test_register_success",
+          "base": "test_register_success",
+          "doc": ""
+        },
+        {
+          "name": "test_register_duplicate_username",
+          "base": "test_register_duplicate_username",
+          "doc": ""
+        },
+        {
+          "name": "test_register_duplicate_email_is_case_insensitive",
+          "base": "test_register_duplicate_email_is_case_insensitive",
+          "doc": ""
+        },
+        {
+          "name": "test_register_parameter_validation[username-abc-\\u7528\\u6237\\u540d\\u957f\\u5ea6\\u5fc5\\u987b\\u5728 4~20 \\u4e2a\\u5b57\\u7b26\\u4e4b\\u95f4]",
+          "base": "test_register_parameter_validation",
+          "doc": "逐个字段构造只违反一条约束的输入，这样返回的文案是确定的。"
+        },
+        {
+          "name": "test_register_parameter_validation[username-1abcdef-\\u7528\\u6237\\u540d\\u5fc5\\u987b\\u4ee5\\u5b57\\u6bcd\\u5f00\\u5934\\uff0c\\u4e14\\u53ea\\u80fd\\u5305\\u542b\\u5b57\\u6bcd\\u3001\\u6570\\u5b57\\u548c\\u4e0b\\u5212\\u7ebf]",
+          "base": "test_register_parameter_validation",
+          "doc": "逐个字段构造只违反一条约束的输入，这样返回的文案是确定的。"
+        },
+        {
+          "name": "test_register_parameter_validation[password-12345-\\u5bc6\\u7801\\u957f\\u5ea6\\u5fc5\\u987b\\u5728 6~20 \\u4e2a\\u5b57\\u7b26\\u4e4b\\u95f4]",
+          "base": "test_register_parameter_validation",
+          "doc": "逐个字段构造只违反一条约束的输入，这样返回的文案是确定的。"
+        },
+        {
+          "name": "test_register_parameter_validation[email-not-an-email-\\u90ae\\u7bb1\\u683c\\u5f0f\\u4e0d\\u6b63\\u786e]",
+          "base": "test_register_parameter_validation",
+          "doc": "逐个字段构造只违反一条约束的输入，这样返回的文案是确定的。"
+        },
+        {
+          "name": "test_register_blank_username_only_checks_code",
+          "base": "test_register_blank_username_only_checks_code",
+          "doc": ""
+        },
+        {
+          "name": "test_login_success",
+          "base": "test_login_success",
+          "doc": ""
+        },
+        {
+          "name": "test_login_wrong_password",
+          "base": "test_login_wrong_password",
+          "doc": ""
+        },
+        {
+          "name": "test_login_unknown_user_returns_same_message",
+          "base": "test_login_unknown_user_returns_same_message",
+          "doc": "用户不存在与密码错误必须返回完全相同的响应，否则可被用来枚举用户名。"
+        },
+        {
+          "name": "test_login_disabled_user",
+          "base": "test_login_disabled_user",
+          "doc": ""
+        },
+        {
+          "name": "test_login_deleted_user",
+          "base": "test_login_deleted_user",
+          "doc": "已注销用户被逻辑删除，登录时表现为\"用户不存在\"。"
+        },
+        {
+          "name": "test_login_blank_parameters[payload0]",
+          "base": "test_login_blank_parameters",
+          "doc": ""
+        },
+        {
+          "name": "test_login_blank_parameters[payload1]",
+          "base": "test_login_blank_parameters",
+          "doc": ""
+        },
+        {
+          "name": "test_me_requires_login",
+          "base": "test_me_requires_login",
+          "doc": ""
+        },
+        {
+          "name": "test_me_returns_403_after_account_disabled",
+          "base": "test_me_returns_403_after_account_disabled",
+          "doc": "禁用立即生效：已签发的旧 Token 会马上失效。"
+        },
+        {
+          "name": "test_logout_requires_login",
+          "base": "test_logout_requires_login",
+          "doc": ""
+        },
+        {
+          "name": "test_logout_with_token",
+          "base": "test_logout_with_token",
+          "doc": ""
+        }
+      ]
+    },
+    "api/test_comment.py": {
+      "count": 13,
+      "tests": [
+        {
+          "name": "test_create_comment_increments_count",
+          "base": "test_create_comment_increments_count",
+          "doc": ""
+        },
+        {
+          "name": "test_comment_blank_content",
+          "base": "test_comment_blank_content",
+          "doc": ""
+        },
+        {
+          "name": "test_comment_content_boundaries",
+          "base": "test_comment_content_boundaries",
+          "doc": ""
+        },
+        {
+          "name": "test_comment_on_missing_post",
+          "base": "test_comment_on_missing_post",
+          "doc": ""
+        },
+        {
+          "name": "test_comment_requires_login",
+          "base": "test_comment_requires_login",
+          "doc": ""
+        },
+        {
+          "name": "test_comment_list_is_ordered_ascending",
+          "base": "test_comment_list_is_ordered_ascending",
+          "doc": "评论按时间正序返回，读起来像对话。"
+        },
+        {
+          "name": "test_seed_post_has_five_comments",
+          "base": "test_seed_post_has_five_comments",
+          "doc": ""
+        },
+        {
+          "name": "test_guest_sees_mine_false",
+          "base": "test_guest_sees_mine_false",
+          "doc": ""
+        },
+        {
+          "name": "test_delete_own_comment_decrements_count",
+          "base": "test_delete_own_comment_decrements_count",
+          "doc": ""
+        },
+        {
+          "name": "test_delete_others_comment_is_forbidden",
+          "base": "test_delete_others_comment_is_forbidden",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_can_delete_any_comment",
+          "base": "test_admin_can_delete_any_comment",
+          "doc": ""
+        },
+        {
+          "name": "test_delete_comment_twice",
+          "base": "test_delete_comment_twice",
+          "doc": ""
+        },
+        {
+          "name": "test_delete_comment_requires_login",
+          "base": "test_delete_comment_requires_login",
+          "doc": ""
+        }
+      ]
+    },
+    "api/test_concurrency.py": {
+      "count": 6,
+      "tests": [
+        {
+          "name": "test_concurrent_duplicate_registration",
+          "base": "test_concurrent_duplicate_registration",
+          "doc": "同一用户名并发注册：只能成功一次，其余 409。"
+        },
+        {
+          "name": "test_concurrent_duplicate_follow",
+          "base": "test_concurrent_duplicate_follow",
+          "doc": "同一用户并发关注同一目标：恰好写入 1 行，粉丝数只 +1。"
+        },
+        {
+          "name": "test_concurrent_unfollow",
+          "base": "test_concurrent_unfollow",
+          "doc": "并发取消关注：恰好一次成功，其余 404（已取消）。"
+        },
+        {
+          "name": "test_concurrent_duplicate_like",
+          "base": "test_concurrent_duplicate_like",
+          "doc": "同一用户并发点赞同一条动态：恰好 1 条点赞记录，likeCount 只 +1。"
+        },
+        {
+          "name": "test_concurrent_create_conversation",
+          "base": "test_concurrent_create_conversation",
+          "doc": "并发建会话必须收敛成同一条（uk_users 唯一键 + 捕获冲突后重查）。"
+        },
+        {
+          "name": "test_concurrent_send_message",
+          "base": "test_concurrent_send_message",
+          "doc": "并发发消息：全部落库，未读数与消息条数都等于成功数。"
+        }
+      ]
+    },
+    "api/test_conversation_mutual_follow.py": {
+      "count": 11,
+      "tests": [
+        {
+          "name": "test_mutual_follow_allows_opening",
+          "base": "test_mutual_follow_allows_opening",
+          "doc": ""
+        },
+        {
+          "name": "test_stranger_cannot_open_conversation",
+          "base": "test_stranger_cannot_open_conversation",
+          "doc": ""
+        },
+        {
+          "name": "test_one_way_follow_cannot_open_conversation",
+          "base": "test_one_way_follow_cannot_open_conversation",
+          "doc": ""
+        },
+        {
+          "name": "test_cannot_reopen_after_unfollow",
+          "base": "test_cannot_reopen_after_unfollow",
+          "doc": "解除互关后，即使会话已经存在也不能再打开。"
+        },
+        {
+          "name": "test_existing_conversation_stays_readable_after_unfollow",
+          "base": "test_existing_conversation_stays_readable_after_unfollow",
+          "doc": "存量会话：解除互关后仍可读取历史消息（可读不可发）。"
+        },
+        {
+          "name": "test_non_member_cannot_read_conversation",
+          "base": "test_non_member_cannot_read_conversation",
+          "doc": "非参与者读会话 → 403 `NOT_CONVERSATION_MEMBER`。"
+        },
+        {
+          "name": "test_non_member_cannot_mark_read",
+          "base": "test_non_member_cannot_mark_read",
+          "doc": ""
+        },
+        {
+          "name": "test_open_self_precedes_mutual_check",
+          "base": "test_open_self_precedes_mutual_check",
+          "doc": "与自己发起会话 → 400，优先级高于互关校验。"
+        },
+        {
+          "name": "test_open_unknown_user_precedes_mutual_check",
+          "base": "test_open_unknown_user_precedes_mutual_check",
+          "doc": "目标不存在 → 404，优先级高于互关校验。"
+        },
+        {
+          "name": "test_open_disabled_user_precedes_mutual_check",
+          "base": "test_open_disabled_user_precedes_mutual_check",
+          "doc": "目标被禁用 → 423，优先级高于互关校验。"
+        },
+        {
+          "name": "test_open_conversation_requires_login",
+          "base": "test_open_conversation_requires_login",
+          "doc": ""
+        }
+      ]
+    },
+    "api/test_file.py": {
+      "count": 14,
+      "tests": [
+        {
+          "name": "test_upload_supported_image_types[\\x89PNG\\r\\n\\x1a\\n\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00-a.png-image/png]",
+          "base": "test_upload_supported_image_types",
+          "doc": "四种受支持格式都能上传，返回 `/uploads/` 下的可访问 URL。"
+        },
+        {
+          "name": "test_upload_supported_image_types[\\xff\\xd8\\xff\\xe0\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00-a.jpg-image/jpeg]",
+          "base": "test_upload_supported_image_types",
+          "doc": "四种受支持格式都能上传，返回 `/uploads/` 下的可访问 URL。"
+        },
+        {
+          "name": "test_upload_supported_image_types[GIF89a\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00-a.gif-image/gif]",
+          "base": "test_upload_supported_image_types",
+          "doc": "四种受支持格式都能上传，返回 `/uploads/` 下的可访问 URL。"
+        },
+        {
+          "name": "test_upload_supported_image_types[RIFF\\x00\\x00\\x00\\x00WEBP\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00-a.webp-image/webp]",
+          "base": "test_upload_supported_image_types",
+          "doc": "四种受支持格式都能上传，返回 `/uploads/` 下的可访问 URL。"
+        },
+        {
+          "name": "test_uploaded_file_is_reachable",
+          "base": "test_uploaded_file_is_reachable",
+          "doc": "上传后返回的 URL 必须真的能取到内容（upload → 校验 → 访问 闭环）。"
+        },
+        {
+          "name": "test_empty_file_is_rejected",
+          "base": "test_empty_file_is_rejected",
+          "doc": "空文件 → 400 `FILE_EMPTY`。"
+        },
+        {
+          "name": "test_oversize_file_is_rejected",
+          "base": "test_oversize_file_is_rejected",
+          "doc": "超过 5MB → 400 `FILE_TOO_LARGE`。"
+        },
+        {
+          "name": "test_disguised_extension_is_rejected",
+          "base": "test_disguised_extension_is_rejected",
+          "doc": "把脚本改名为 .jpg 提交 → 后缀骗不过魔数校验。"
+        },
+        {
+          "name": "test_mime_type_lies_about_content",
+          "base": "test_mime_type_lies_about_content",
+          "doc": "Content-Type 声明 image/png，实际内容是文本 → 依然被拒。"
+        },
+        {
+          "name": "test_tiny_file_is_rejected",
+          "base": "test_tiny_file_is_rejected",
+          "doc": "2 字节的极小文件 → 长度不足 12，无法判定魔数，按类型不合法拒绝。"
+        },
+        {
+          "name": "test_real_image_with_wrong_extension_is_accepted",
+          "base": "test_real_image_with_wrong_extension_is_accepted",
+          "doc": "反向用例：内容是真 PNG，只是文件名/Content-Type 写错 → 应当放行。"
+        },
+        {
+          "name": "test_upload_requires_login",
+          "base": "test_upload_requires_login",
+          "doc": ""
+        },
+        {
+          "name": "test_upload_missing_file_param",
+          "base": "test_upload_missing_file_param",
+          "doc": "multipart 请求里没有 `file` 字段 → 400 缺少必要参数（而不是 500）。"
+        },
+        {
+          "name": "test_upload_wrong_content_type",
+          "base": "test_upload_wrong_content_type",
+          "doc": "非 multipart 请求 → 400 不支持的请求类型（而不是 500）。"
+        }
+      ]
+    },
+    "api/test_follow.py": {
+      "count": 19,
+      "tests": [
+        {
+          "name": "test_follow_and_unfollow",
+          "base": "test_follow_and_unfollow",
+          "doc": ""
+        },
+        {
+          "name": "test_duplicate_follow_returns_conflict",
+          "base": "test_duplicate_follow_returns_conflict",
+          "doc": ""
+        },
+        {
+          "name": "test_follow_again_after_unfollow",
+          "base": "test_follow_again_after_unfollow",
+          "doc": "取消关注后必须能重新关注 —— 同样是为了验证 follow 表是物理删除。"
+        },
+        {
+          "name": "test_cannot_follow_self",
+          "base": "test_cannot_follow_self",
+          "doc": ""
+        },
+        {
+          "name": "test_unfollow_without_following",
+          "base": "test_unfollow_without_following",
+          "doc": ""
+        },
+        {
+          "name": "test_follow_disabled_user",
+          "base": "test_follow_disabled_user",
+          "doc": ""
+        },
+        {
+          "name": "test_follow_deleted_user",
+          "base": "test_follow_deleted_user",
+          "doc": ""
+        },
+        {
+          "name": "test_follow_unknown_user",
+          "base": "test_follow_unknown_user",
+          "doc": ""
+        },
+        {
+          "name": "test_follow_requires_login",
+          "base": "test_follow_requires_login",
+          "doc": ""
+        },
+        {
+          "name": "test_following_and_follower_lists",
+          "base": "test_following_and_follower_lists",
+          "doc": "test001 在种子数据里关注了 6 个人。"
+        },
+        {
+          "name": "test_follower_list_marks_followed_back",
+          "base": "test_follower_list_marks_followed_back",
+          "doc": "粉丝列表里的 followedByMe 决定要不要显示「回关」按钮。"
+        },
+        {
+          "name": "test_guest_sees_false_follow_flags",
+          "base": "test_guest_sees_false_follow_flags",
+          "doc": ""
+        },
+        {
+          "name": "test_mutual_follow_is_reported",
+          "base": "test_mutual_follow_is_reported",
+          "doc": "test001 与 test002 在种子数据里互相关注。"
+        },
+        {
+          "name": "test_profile_hides_email",
+          "base": "test_profile_hides_email",
+          "doc": ""
+        },
+        {
+          "name": "test_profile_not_found",
+          "base": "test_profile_not_found",
+          "doc": ""
+        },
+        {
+          "name": "test_deleted_user_profile_is_not_visible",
+          "base": "test_deleted_user_profile_is_not_visible",
+          "doc": ""
+        },
+        {
+          "name": "test_banned_user_profile_is_still_visible",
+          "base": "test_banned_user_profile_is_still_visible",
+          "doc": "被禁用的用户主页仍可浏览（只是无法与之互动）。"
+        },
+        {
+          "name": "test_following_feed_contains_only_followed_authors",
+          "base": "test_following_feed_contains_only_followed_authors",
+          "doc": "关注流里不能出现未关注者的动态。"
+        },
+        {
+          "name": "test_seed_constants_are_consistent",
+          "base": "test_seed_constants_are_consistent",
+          "doc": "防止本文件的常量与 conftest 里的账号名脱节。"
+        }
+      ]
+    },
+    "api/test_message.py": {
+      "count": 17,
+      "tests": [
+        {
+          "name": "test_send_message_creates_conversation",
+          "base": "test_send_message_creates_conversation",
+          "doc": ""
+        },
+        {
+          "name": "test_unread_count_increments_for_receiver_only",
+          "base": "test_unread_count_increments_for_receiver_only",
+          "doc": ""
+        },
+        {
+          "name": "test_mark_conversation_read",
+          "base": "test_mark_conversation_read",
+          "doc": ""
+        },
+        {
+          "name": "test_mark_read_does_not_affect_partner",
+          "base": "test_mark_read_does_not_affect_partner",
+          "doc": ""
+        },
+        {
+          "name": "test_conversation_is_symmetric",
+          "base": "test_conversation_is_symmetric",
+          "doc": "(A,B) 与 (B,A) 必须是同一条会话。"
+        },
+        {
+          "name": "test_open_conversation_is_idempotent",
+          "base": "test_open_conversation_is_idempotent",
+          "doc": ""
+        },
+        {
+          "name": "test_cannot_message_self",
+          "base": "test_cannot_message_self",
+          "doc": ""
+        },
+        {
+          "name": "test_message_content_boundaries",
+          "base": "test_message_content_boundaries",
+          "doc": ""
+        },
+        {
+          "name": "test_message_blank_content",
+          "base": "test_message_blank_content",
+          "doc": ""
+        },
+        {
+          "name": "test_message_to_unknown_user",
+          "base": "test_message_to_unknown_user",
+          "doc": ""
+        },
+        {
+          "name": "test_send_message_requires_login",
+          "base": "test_send_message_requires_login",
+          "doc": ""
+        },
+        {
+          "name": "test_message_history_is_chronological",
+          "base": "test_message_history_is_chronological",
+          "doc": ""
+        },
+        {
+          "name": "test_message_cursor_pagination",
+          "base": "test_message_cursor_pagination",
+          "doc": "游标分页：用最早一条的 id 继续往前翻，两页之间不重不漏。"
+        },
+        {
+          "name": "test_conversation_list_orders_by_last_message",
+          "base": "test_conversation_list_orders_by_last_message",
+          "doc": ""
+        },
+        {
+          "name": "test_empty_conversation_is_hidden",
+          "base": "test_empty_conversation_is_hidden",
+          "doc": "建了但一条消息都没发过的会话不出现在列表里。"
+        },
+        {
+          "name": "test_non_member_cannot_read_messages",
+          "base": "test_non_member_cannot_read_messages",
+          "doc": ""
+        },
+        {
+          "name": "test_seed_user_unread_total",
+          "base": "test_seed_user_unread_total",
+          "doc": "test001 在种子数据里会话 1 有 2 条未读。"
+        }
+      ]
+    },
+    "api/test_message_mutual_follow.py": {
+      "count": 14,
+      "tests": [
+        {
+          "name": "test_mutual_follow_allows_sending",
+          "base": "test_mutual_follow_allows_sending",
+          "doc": ""
+        },
+        {
+          "name": "test_stranger_cannot_send",
+          "base": "test_stranger_cannot_send",
+          "doc": "完全没有关注关系 → 403。"
+        },
+        {
+          "name": "test_one_way_follow_cannot_send",
+          "base": "test_one_way_follow_cannot_send",
+          "doc": "只关注了对方、对方没回关 → 依然不能发。"
+        },
+        {
+          "name": "test_receiver_following_sender_only_cannot_send",
+          "base": "test_receiver_following_sender_only_cannot_send",
+          "doc": "反方向单向关注（对方关注了我）同样不构成互关。"
+        },
+        {
+          "name": "test_cannot_send_after_unfollow",
+          "base": "test_cannot_send_after_unfollow",
+          "doc": "取消互关后，原本能发的会话立刻不能发。"
+        },
+        {
+          "name": "test_sending_is_restored_after_refollow",
+          "base": "test_sending_is_restored_after_refollow",
+          "doc": "重新互关后恢复发送 —— 与关注/点赞一致，关系是物理删除，可以重新建立。"
+        },
+        {
+          "name": "test_history_stays_readable_after_unfollow",
+          "base": "test_history_stays_readable_after_unfollow",
+          "doc": "取消互关只挡\"新消息\"，历史记录必须照常可读。"
+        },
+        {
+          "name": "test_mark_read_still_works_after_unfollow",
+          "base": "test_mark_read_still_works_after_unfollow",
+          "doc": "取消互关后仍能标记已读，否则未读角标会永远清不掉。"
+        },
+        {
+          "name": "test_blocked_send_leaves_no_trace",
+          "base": "test_blocked_send_leaves_no_trace",
+          "doc": "非互关发送被拒后：不产生会话、不产生未读、不产生消息。"
+        },
+        {
+          "name": "test_dto_validation_precedes_mutual_check",
+          "base": "test_dto_validation_precedes_mutual_check",
+          "doc": "非互关 + 空内容 → 400「消息内容不能为空」，不是 403。"
+        },
+        {
+          "name": "test_mutual_check_precedes_length_check",
+          "base": "test_mutual_check_precedes_length_check",
+          "doc": "非互关 + 超长内容（DTO 的 @Size 先拦）→ 400，同样到不了互关校验。"
+        },
+        {
+          "name": "test_self_check_precedes_mutual_check",
+          "base": "test_self_check_precedes_mutual_check",
+          "doc": "给自己发 → 400，优先级高于互关校验（自己和自己永远不构成互关）。"
+        },
+        {
+          "name": "test_unknown_receiver_precedes_mutual_check",
+          "base": "test_unknown_receiver_precedes_mutual_check",
+          "doc": "接收者不存在 → 404，优先级高于互关校验。"
+        },
+        {
+          "name": "test_disabled_receiver_precedes_mutual_check",
+          "base": "test_disabled_receiver_precedes_mutual_check",
+          "doc": "接收者被禁用 → 423，优先级高于互关校验。"
+        }
+      ]
+    },
+    "api/test_notification.py": {
+      "count": 16,
+      "tests": [
+        {
+          "name": "test_notifications_require_login",
+          "base": "test_notifications_require_login",
+          "doc": ""
+        },
+        {
+          "name": "test_follow_creates_notification",
+          "base": "test_follow_creates_notification",
+          "doc": ""
+        },
+        {
+          "name": "test_unfollow_removes_notification",
+          "base": "test_unfollow_removes_notification",
+          "doc": ""
+        },
+        {
+          "name": "test_like_creates_notification",
+          "base": "test_like_creates_notification",
+          "doc": ""
+        },
+        {
+          "name": "test_unlike_removes_notification",
+          "base": "test_unlike_removes_notification",
+          "doc": ""
+        },
+        {
+          "name": "test_comment_creates_notification_with_snapshot",
+          "base": "test_comment_creates_notification_with_snapshot",
+          "doc": ""
+        },
+        {
+          "name": "test_self_actions_do_not_notify",
+          "base": "test_self_actions_do_not_notify",
+          "doc": "关注/点赞/评论自己不该给自己发通知。"
+        },
+        {
+          "name": "test_mark_single_notification_read",
+          "base": "test_mark_single_notification_read",
+          "doc": ""
+        },
+        {
+          "name": "test_mark_read_is_idempotent",
+          "base": "test_mark_read_is_idempotent",
+          "doc": ""
+        },
+        {
+          "name": "test_cannot_mark_others_notification",
+          "base": "test_cannot_mark_others_notification",
+          "doc": ""
+        },
+        {
+          "name": "test_mark_all_read",
+          "base": "test_mark_all_read",
+          "doc": ""
+        },
+        {
+          "name": "test_mark_all_read_does_not_affect_others",
+          "base": "test_mark_all_read_does_not_affect_others",
+          "doc": ""
+        },
+        {
+          "name": "test_unread_count_shape",
+          "base": "test_unread_count_shape",
+          "doc": "未读数按类型拆开，且 total 等于三项之和。"
+        },
+        {
+          "name": "test_notification_type_filter",
+          "base": "test_notification_type_filter",
+          "doc": "只返回关注/点赞/评论三类，不存在私信类通知。"
+        },
+        {
+          "name": "test_notification_actor_has_no_email",
+          "base": "test_notification_actor_has_no_email",
+          "doc": ""
+        },
+        {
+          "name": "test_invalid_type_filter",
+          "base": "test_invalid_type_filter",
+          "doc": ""
+        }
+      ]
+    },
+    "api/test_post.py": {
+      "count": 31,
+      "tests": [
+        {
+          "name": "test_create_text_post",
+          "base": "test_create_text_post",
+          "doc": ""
+        },
+        {
+          "name": "test_create_post_with_images_keeps_order",
+          "base": "test_create_post_with_images_keeps_order",
+          "doc": ""
+        },
+        {
+          "name": "test_create_post_content_and_images_both_empty",
+          "base": "test_create_post_content_and_images_both_empty",
+          "doc": ""
+        },
+        {
+          "name": "test_create_post_content_too_long",
+          "base": "test_create_post_content_too_long",
+          "doc": ""
+        },
+        {
+          "name": "test_create_post_content_exactly_max_length",
+          "base": "test_create_post_content_exactly_max_length",
+          "doc": ""
+        },
+        {
+          "name": "test_create_post_too_many_images",
+          "base": "test_create_post_too_many_images",
+          "doc": ""
+        },
+        {
+          "name": "test_create_post_rejects_external_image_url",
+          "base": "test_create_post_rejects_external_image_url",
+          "doc": "外链图片必须被拒绝，否则服务器会沦为别人的图床，内容也无从审核。"
+        },
+        {
+          "name": "test_create_post_requires_login",
+          "base": "test_create_post_requires_login",
+          "doc": ""
+        },
+        {
+          "name": "test_list_latest_as_guest",
+          "base": "test_list_latest_as_guest",
+          "doc": ""
+        },
+        {
+          "name": "test_list_latest_guest_flags_are_false",
+          "base": "test_list_latest_guest_flags_are_false",
+          "doc": ""
+        },
+        {
+          "name": "test_list_latest_is_ordered_by_time_desc",
+          "base": "test_list_latest_is_ordered_by_time_desc",
+          "doc": ""
+        },
+        {
+          "name": "test_list_invalid_tab",
+          "base": "test_list_invalid_tab",
+          "doc": ""
+        },
+        {
+          "name": "test_list_size_over_limit",
+          "base": "test_list_size_over_limit",
+          "doc": ""
+        },
+        {
+          "name": "test_following_tab_requires_login",
+          "base": "test_following_tab_requires_login",
+          "doc": ""
+        },
+        {
+          "name": "test_post_detail",
+          "base": "test_post_detail",
+          "doc": ""
+        },
+        {
+          "name": "test_post_detail_not_found",
+          "base": "test_post_detail_not_found",
+          "doc": ""
+        },
+        {
+          "name": "test_post_images_are_ordered",
+          "base": "test_post_images_are_ordered",
+          "doc": ""
+        },
+        {
+          "name": "test_delete_own_post",
+          "base": "test_delete_own_post",
+          "doc": ""
+        },
+        {
+          "name": "test_delete_others_post_is_forbidden",
+          "base": "test_delete_others_post_is_forbidden",
+          "doc": ""
+        },
+        {
+          "name": "test_admin_can_delete_any_post",
+          "base": "test_admin_can_delete_any_post",
+          "doc": ""
+        },
+        {
+          "name": "test_delete_post_requires_login",
+          "base": "test_delete_post_requires_login",
+          "doc": ""
+        },
+        {
+          "name": "test_like_and_unlike",
+          "base": "test_like_and_unlike",
+          "doc": ""
+        },
+        {
+          "name": "test_duplicate_like_returns_conflict",
+          "base": "test_duplicate_like_returns_conflict",
+          "doc": ""
+        },
+        {
+          "name": "test_unlike_without_like_returns_not_found",
+          "base": "test_unlike_without_like_returns_not_found",
+          "doc": ""
+        },
+        {
+          "name": "test_like_again_after_unlike",
+          "base": "test_like_again_after_unlike",
+          "doc": "取消点赞后必须能再次点赞。"
+        },
+        {
+          "name": "test_like_count_accumulates_across_users",
+          "base": "test_like_count_accumulates_across_users",
+          "doc": ""
+        },
+        {
+          "name": "test_like_requires_login",
+          "base": "test_like_requires_login",
+          "doc": ""
+        },
+        {
+          "name": "test_liked_by_me_flag",
+          "base": "test_liked_by_me_flag",
+          "doc": "test001 是 post 1 的作者，种子数据里 user 2~11 都点过赞。"
+        },
+        {
+          "name": "test_user_posts_listing",
+          "base": "test_user_posts_listing",
+          "doc": ""
+        },
+        {
+          "name": "test_seed_user_has_posts",
+          "base": "test_seed_user_has_posts",
+          "doc": ""
+        },
+        {
+          "name": "test_seed_user_login_is_stable",
+          "base": "test_seed_user_login_is_stable",
+          "doc": "种子账号可用性自检：其他用例大量依赖它。"
+        }
+      ]
+    },
+    "api/test_search.py": {
+      "count": 15,
+      "tests": [
+        {
+          "name": "test_search_by_nickname",
+          "base": "test_search_by_nickname",
+          "doc": ""
+        },
+        {
+          "name": "test_search_by_username_prefix",
+          "base": "test_search_by_username_prefix",
+          "doc": ""
+        },
+        {
+          "name": "test_search_result_shape",
+          "base": "test_search_result_shape",
+          "doc": ""
+        },
+        {
+          "name": "test_search_results_ordered_by_follower_count",
+          "base": "test_search_results_ordered_by_follower_count",
+          "doc": "粉丝多的排前面：搜索结果里\"谁都认识的人\"更应该被看到。"
+        },
+        {
+          "name": "test_search_no_match",
+          "base": "test_search_no_match",
+          "doc": ""
+        },
+        {
+          "name": "test_percent_is_escaped",
+          "base": "test_percent_is_escaped",
+          "doc": "`%` 必须被当作普通字符。"
+        },
+        {
+          "name": "test_underscore_is_escaped",
+          "base": "test_underscore_is_escaped",
+          "doc": "`_` 必须被当作普通字符，而不是\"匹配任意单字符\"。"
+        },
+        {
+          "name": "test_wrapped_wildcard_is_escaped",
+          "base": "test_wrapped_wildcard_is_escaped",
+          "doc": ""
+        },
+        {
+          "name": "test_backslash_does_not_break_query",
+          "base": "test_backslash_does_not_break_query",
+          "doc": "反斜杠是 ESCAPE 字符本身，必须被转义，否则会破坏 SQL 的 ESCAPE 子句。"
+        },
+        {
+          "name": "test_blank_keyword",
+          "base": "test_blank_keyword",
+          "doc": ""
+        },
+        {
+          "name": "test_missing_keyword",
+          "base": "test_missing_keyword",
+          "doc": ""
+        },
+        {
+          "name": "test_keyword_too_long",
+          "base": "test_keyword_too_long",
+          "doc": ""
+        },
+        {
+          "name": "test_search_is_public",
+          "base": "test_search_is_public",
+          "doc": "搜索在免登录白名单里。"
+        },
+        {
+          "name": "test_guest_follow_flags_are_false",
+          "base": "test_guest_follow_flags_are_false",
+          "doc": ""
+        },
+        {
+          "name": "test_followed_by_me_reflects_real_relation",
+          "base": "test_followed_by_me_reflects_real_relation",
+          "doc": ""
+        }
+      ]
+    },
+    "api/test_user.py": {
+      "count": 18,
+      "tests": [
+        {
+          "name": "test_get_current_user",
+          "base": "test_get_current_user",
+          "doc": ""
+        },
+        {
+          "name": "test_get_current_user_requires_login",
+          "base": "test_get_current_user_requires_login",
+          "doc": ""
+        },
+        {
+          "name": "test_update_profile",
+          "base": "test_update_profile",
+          "doc": ""
+        },
+        {
+          "name": "test_update_profile_does_not_change_username_or_email",
+          "base": "test_update_profile_does_not_change_username_or_email",
+          "doc": "用户名与邮箱不可通过资料接口修改（它们有唯一约束）。"
+        },
+        {
+          "name": "test_update_profile_validation[payload0-400]",
+          "base": "test_update_profile_validation",
+          "doc": ""
+        },
+        {
+          "name": "test_update_profile_validation[payload1-400]",
+          "base": "test_update_profile_validation",
+          "doc": ""
+        },
+        {
+          "name": "test_update_profile_validation[payload2-400]",
+          "base": "test_update_profile_validation",
+          "doc": ""
+        },
+        {
+          "name": "test_update_profile_validation[payload3-400]",
+          "base": "test_update_profile_validation",
+          "doc": ""
+        },
+        {
+          "name": "test_update_profile_requires_login",
+          "base": "test_update_profile_requires_login",
+          "doc": ""
+        },
+        {
+          "name": "test_change_password",
+          "base": "test_change_password",
+          "doc": ""
+        },
+        {
+          "name": "test_change_password_wrong_old",
+          "base": "test_change_password_wrong_old",
+          "doc": ""
+        },
+        {
+          "name": "test_change_password_same_as_old",
+          "base": "test_change_password_same_as_old",
+          "doc": ""
+        },
+        {
+          "name": "test_change_password_too_short",
+          "base": "test_change_password_too_short",
+          "doc": ""
+        },
+        {
+          "name": "test_update_avatar",
+          "base": "test_update_avatar",
+          "doc": ""
+        },
+        {
+          "name": "test_update_avatar_blank",
+          "base": "test_update_avatar_blank",
+          "doc": ""
+        },
+        {
+          "name": "test_me_path_is_not_whitelisted",
+          "base": "test_me_path_is_not_whitelisted",
+          "doc": "`/api/users/me` 必须要求登录。"
+        },
+        {
+          "name": "test_numeric_user_path_is_public",
+          "base": "test_numeric_user_path_is_public",
+          "doc": "数字 ID 形式的主页对游客开放。"
+        },
+        {
+          "name": "test_seed_user_profile",
+          "base": "test_seed_user_profile",
+          "doc": ""
+        }
+      ]
+    }
+  }
+}

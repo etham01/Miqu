@@ -1,0 +1,151 @@
+# Miqu 冒烟用例集合（`-m smoke`）
+#
+# 用途：对外演示、提交前自检、CI 首轮。
+# 实测：`pytest -m smoke` → 43/246 selected。
+#
+# 本文件按「一条链路」而不是「一条断言」组织：冒烟的意义是走通主流程，
+# 具体断言强度交给各自的用例文件。
+
+meta:
+  marker: smoke
+  command: "cd tests && python -m pytest -m smoke"
+  collected: 43
+  last_verified: 2026-09-14
+  status: PASS
+
+smoke_paths:
+
+  - id: SMK-001
+    title: 注册成功
+    pytest: api/test_auth.py::test_register_success
+    status: implemented
+
+  - id: SMK-002
+    title: 登录成功
+    pytest: api/test_auth.py::test_login_success
+    status: implemented
+
+  - id: SMK-003
+    title: 查看当前用户资料
+    pytest: api/test_user.py::test_get_current_user
+    status: implemented
+
+  - id: SMK-004
+    title: 修改个人资料
+    pytest: api/test_user.py::test_update_profile
+    status: implemented
+
+  - id: SMK-005
+    title: 修改密码
+    pytest: api/test_user.py::test_change_password
+    status: implemented
+
+  - id: SMK-006
+    title: 搜索用户（按昵称）
+    pytest: api/test_search.py::test_search_by_nickname
+    status: implemented
+
+  - id: SMK-007
+    title: 关注 / 取消关注
+    pytest: api/test_follow.py::test_follow_and_unfollow
+    status: implemented
+
+  - id: SMK-008
+    title: 取消后重新关注
+    pytest: api/test_follow.py::test_follow_again_after_unfollow
+    status: implemented
+
+  - id: SMK-009
+    title: 发布文字动态
+    pytest: api/test_post.py::test_create_text_post
+    status: implemented
+
+  - id: SMK-010
+    title: 游客查看最新动态列表
+    pytest: api/test_post.py::test_list_latest_as_guest
+    status: implemented
+
+  - id: SMK-011
+    title: 点赞 / 取消点赞
+    pytest: api/test_post.py::test_like_and_unlike
+    status: implemented
+
+  - id: SMK-012
+    title: 取消后再次点赞
+    pytest: api/test_post.py::test_like_again_after_unlike
+    status: implemented
+
+  - id: SMK-013
+    title: 发表评论并使评论数 +1
+    pytest: api/test_comment.py::test_create_comment_increments_count
+    status: implemented
+
+  - id: SMK-014
+    title: 评论列表按时间正序
+    pytest: api/test_comment.py::test_comment_list_is_ordered_ascending
+    status: implemented
+
+  - id: SMK-015
+    title: 互关后发送私信（自动建会话）
+    pytest: api/test_message.py::test_send_message_creates_conversation
+    status: implemented
+
+  - id: SMK-016
+    title: 未读数只增接收方
+    pytest: api/test_message.py::test_unread_count_increments_for_receiver_only
+    status: implemented
+
+  - id: SMK-017
+    title: 聊天记录按时间正序
+    pytest: api/test_message.py::test_message_history_is_chronological
+    status: implemented
+
+  - id: SMK-018
+    title: 互关可以发送私信（规则正向）
+    pytest: api/test_message_mutual_follow.py::test_mutual_follow_allows_sending
+    status: implemented
+
+  - id: SMK-019
+    title: 非互关不能发送私信（规则负向）
+    pytest: api/test_message_mutual_follow.py::test_stranger_cannot_send
+    status: implemented
+
+  - id: SMK-020
+    title: 互关可以打开会话
+    pytest: api/test_conversation_mutual_follow.py::test_mutual_follow_allows_opening
+    status: implemented
+
+  - id: SMK-021
+    title: 非互关不能打开会话
+    pytest: api/test_conversation_mutual_follow.py::test_stranger_cannot_open_conversation
+    status: implemented
+
+  - id: SMK-022
+    title: 上传图片（png / jpg / gif / webp）
+    pytest: api/test_file.py::test_upload_supported_image_types
+    status: implemented
+
+  - id: SMK-023
+    title: 单条通知标记已读
+    pytest: api/test_notification.py::test_mark_single_notification_read
+    status: implemented
+
+  - id: SMK-024
+    title: 全部通知标记已读
+    pytest: api/test_notification.py::test_mark_all_read
+    status: implemented
+
+  - id: SMK-025
+    title: 后台 7 个接口未登录返回 401
+    pytest: api/test_admin.py::test_admin_endpoints_require_login
+    status: implemented
+
+  - id: SMK-026
+    title: 后台 7 个接口普通用户返回 403
+    pytest: api/test_admin.py::test_admin_endpoints_forbid_normal_user
+    status: implemented
+
+  - id: SMK-027
+    title: 管理员处理举报（含处置动作）
+    pytest: api/test_admin.py::test_handle_report_with_delete_action
+    status: implemented

@@ -9,6 +9,7 @@ import com.miqu.common.PageResult;
 import com.miqu.common.SqlLikeUtils;
 import com.miqu.common.enums.RoleEnum;
 import com.miqu.common.enums.UserStatusEnum;
+import com.miqu.config.MiquProperties;
 import com.miqu.converter.UserConverter;
 import com.miqu.dto.query.UserSearchQuery;
 import com.miqu.dto.request.ChangePasswordRequest;
@@ -39,6 +40,7 @@ public class UserServiceImpl implements UserService {
     private final UserMapper userMapper;
     private final FollowStatusLoader followStatusLoader;
     private final PasswordEncoder passwordEncoder;
+    private final MiquProperties properties;
 
     @Override
     public UserVO getCurrentUser(Long userId) {
@@ -90,9 +92,20 @@ public class UserServiceImpl implements UserService {
     public UserVO updateAvatar(Long userId, UpdateAvatarRequest request) {
         requireActiveUser(userId);
 
+        String avatar = request.avatar().trim();
+
+        // 与发布动态的图片校验保持一致：只接受本项目上传接口返回的地址。
+        // 否则用户可以把自己的头像指向任意外链（追踪像素、违规图），
+        // 服务器既成了别人的图床，内容审核也无从下手。
+        // 前缀必须带 "/"，否则 "/uploads-evil/x.png" 这类近似串会蒙混过关。
+        String prefix = properties.getUpload().getUrlPrefix() + "/";
+        if (!avatar.startsWith(prefix)) {
+            throw BizException.of(ErrorCode.INVALID_IMAGE_URL);
+        }
+
         User update = new User();
         update.setId(userId);
-        update.setAvatar(request.avatar().trim());
+        update.setAvatar(avatar);
         userMapper.updateById(update);
 
         log.info("用户修改头像: userId={}", userId);

@@ -3,6 +3,7 @@
   <component name="ProjectModuleManager">
     <modules>
       <module fileurl="file://$PROJECT_DIR$/.idea/Miqu.iml" filepath="$PROJECT_DIR$/.idea/Miqu.iml" />
+      <module fileurl="file://$PROJECT_DIR$/backend/miqu-backend.iml" filepath="$PROJECT_DIR$/backend/miqu-backend.iml" />
     </modules>
   </component>
 </project>

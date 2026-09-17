@@ -1,0 +1,477 @@
+# Miqu 校验顺序知识库
+#
+# 用途：回答一个**只有本文件回答**的问题 ——
+#       **"一个请求同时违反多条规则时，代码实际先抛哪一个？"**
+#
+# 为什么必须单独成文：
+#   ai 生成"叠加违规"用例时（例如"非互关 + 空内容"），如果按直觉挑一个规则来断言，
+#   极可能断言了永远抛不出来的那个码。本项目**真实发生过**这种误判：
+#   曾把"非互关 + 空内容"记为 403，实测是 400（原因：DTO 的 @NotBlank 在 Service 之前执行）。
+#   见本文件 §6 historical_misjudgments。
+#
+# 消费者：
+#   LLM               → 生成叠加违规用例前必读，决定断言哪个 code
+#   BusinessValidator → 拦截"预期 code 与代码实际抛出顺序不符"的用例
+#   CoverageValidator → 统计"叠加违规"这一类的覆盖情况
+#
+# 真相来源（逐行读取）：
+#   security/JwtAuthenticationFilter.java        —— 第 1 层（身份识别）
+#   security/AuthInterceptor.java                —— 第 2 层（准入控制）
+#   config/WebMvcConfig.java                     —— 拦截器注册范围 /api/**
+#   dto/request/*.java                           —— 第 3 层（Bean Validation 注解）
+#   exception/GlobalExceptionHandler.java        —— 各层异常→响应码的映射
+#   service/impl/*.java                          —— 第 4 层（业务校验的书写顺序）
+#   database/schema.sql                          —— 第 5 层（唯一键兜底）
+#
+# confidence: CONFIRMED（其中标注 INFERRED 的需要注意）
+# verified_at: 2026-09-17（用 .workbuddy/tools/validation_order_probe.mjs 与
+#              auth_layer_probe.mjs 实测，13 + 7 项全部与预期一致）
+
+meta:
+  generated_at: 2026-09-17
+  scope: "全部 50 个端点；本文件只写「跨层的顺序结论」，端点级 code 序列见 api/endpoints.yaml"
+  no_duplication_note: >-
+    ⚠️ **本文件不复制端点级的 code 序列。**
+    api/endpoints.yaml 的 `error_check_order` 字段（已覆盖 14 个关键端点）是那部分事实的唯一真相。
+    本文件只补充：① 跨层优先级模型（endpoints.yaml 没有）② 死分支清单
+    ③ 叠加违规的胜出方（以 rule_id 表达，便于与 business_rules.yaml 交叉校验）。
+  probe_artifacts:
+    - .workbuddy/tools/validation_order_probe.mjs
+    - .workbuddy/tools/auth_layer_probe.mjs
+    - .workbuddy/tmp/auth_layer_probe.md
+
+# ═══════════════════════════════════════════════════════════════
+# 1. 分层优先级模型（最重要的一张表）
+# ═══════════════════════════════════════════════════════════════
+layer_order:
+  desc: >-
+    请求从进入容器到触达业务代码，依次经过 6 层。**序号小的先执行**，
+    因此"同时违反"时总是序号小的那一层胜出。
+    生成叠加违规用例时，**取所有被违反的规则中最小的层号**，那才是实际返回的 code。
+  ordering_authority: >-
+    Spring MVC 的执行顺序：Filter → HandlerInterceptor.preHandle → 参数解析
+    （含 @Valid 与 @PathVariable 绑定）→ Controller 方法体 → Service。
+    preHandle 在参数解析之前，这是第 2 层先于第 3 层的**机制性原因**，不是巧合。
+  layers:
+    - "layer: 0"
+      name: CORS 预检
+      handler: WebMvcConfig#addCorsMappings + DispatcherServlet 的 PreFlightRequestHandler
+      code: 200
+      note: >-
+        OPTIONS 预检请求的 handler **不是 HandlerMethod**，因此
+        AuthInterceptor 第一行的 `!(handler instanceof HandlerMethod) → return true`
+        直接放行，不做任何鉴权。→ 预检**不会**因为未登录而 401。
+      testable: "可选；本项目无前端跨域测试，属低优先级"
+
+    - "layer: 1"
+      name: 身份识别（Filter）
+      handler: JwtAuthenticationFilter（OncePerRequestFilter）
+      does: >-
+        解析 Authorization: Bearer <token>；成功则查库校验账号状态并写入
+        CurrentUserHolder（ThreadLocal）；失败只把原因写入 request attribute
+        miqu.authError，**不在这里拒绝请求**。
+      does_not: "不做访问控制（不决定放不放行）"
+      outcomes:
+        - {condition: "无 Authorization 头 / 不以 'Bearer ' 开头", effect: "不设任何属性（按游客继续）"}
+        - {condition: "签名非法 / 已过期 / 格式错误", effect: "authError = UNAUTHORIZED(401)"}
+        - {condition: "Token 合法但用户已被逻辑删除", effect: "authError = UNAUTHORIZED(401)"}
+        - {condition: "Token 合法但 user.status = 0", effect: "authError = USER_DISABLED(423)"}
+        - {condition: "一切正常", effect: "CurrentUserHolder.set(LoginUser)"}
+      critical_fact: >-
+        **每请求查库**（JwtAuthenticationFilter.java:64-69）。所以禁用账号后旧 Token
+        **立即**失效，不必等 7 天过期 —— 这是 SEC-002 的实现基础。
+      verified: "auth_layer_probe A1（已删除→401）、validation_order_probe P6（已禁用→423）"
+
+    - "layer: 2"
+      name: 准入控制（Interceptor）
+      handler: AuthInterceptor#preHandle，注册于 /api/**（WebMvcConfig.java:29）
+      outcomes:
+        - {condition: "非 HandlerMethod（如 OPTIONS 预检、静态资源）", code: 200, effect: 放行}
+        - {condition: "@RequireAdmin 且 currentUser == null", code: "401（或透传 authError，即 423）"}
+        - {condition: "@RequireAdmin 且 !isAdmin", code: 403, error_code: FORBIDDEN}
+        - {condition: "不在白名单 且 currentUser == null", code: "401（或透传 authError，即 423）"}
+        - {condition: "其余", code: 200, effect: 放行}
+      critical_fact: >-
+        **拦截器先于 Bean Validation**（实测 P3：禁用账号 + 空 avatar → 423，而非 400）。
+        这正是本文件最重要的结论：**认证层的 401/423 永远压过参数层的 400**。
+      whitelist_size: 12
+      whitelist_entries: 见 api/conventions.yaml → auth_whitelist
+      policy: "失败关闭：不登记在白名单的 /api/** 一律需登录"
+
+    - "layer: 3"
+      name: 参数解析与校验（Controller 参数绑定）
+      handler: RequestMappingHandlerAdapter 的参数解析器
+      outcomes:
+        - {condition: "@Valid @RequestBody 字段违反 @NotBlank/@Size/@Pattern/@Email/@Min/@Max", code: 400, error_code: PARAM_INVALID, message_rule: "取第一个 FieldError 的自定义 message"}
+        - {condition: "@Valid 查询对象（PageQuery 等）校验失败", code: 400, error_code: PARAM_INVALID}
+        - {condition: "请求体不是合法 JSON / 字段类型不匹配", code: 400, error_code: PARAM_INVALID, message: 请求体格式不正确}
+        - {condition: "路径变量类型不匹配（如 /api/posts/abc）", code: 400, error_code: PARAM_INVALID, message: "参数格式不正确：id"}
+        - {condition: "缺少 @RequestParam", code: 400, error_code: PARAM_INVALID, message: "缺少必要参数：xxx"}
+        - {condition: "缺 multipart 的 part", code: 400, error_code: PARAM_INVALID, message: "缺少必要参数：file"}
+        - {condition: "Content-Type 不是接口声明的类型", code: 400, error_code: PARAM_INVALID, message: "不支持的请求类型：…"}
+        - {condition: "HTTP 方法不支持", code: 405, message: "请求方法不支持：POST"}
+      critical_fact: >-
+        这一层**先于全部 Service 业务校验**。所以"DTO 能拦下来的 400"永远压过
+        Service 里的 403/404/409。实测 P7（非互关 + 空 content → 400 而非 403）
+        与 P10（targetType=4 → @Max 拦为 PARAM_INVALID，Service 的 INVALID_TARGET_TYPE 不可达）。
+      message_assertion_note: >-
+        ⚠️ 参数校验失败的 message **几乎从不是** "参数校验失败"（PARAM_INVALID 的默认文案）。
+        GlobalExceptionHandler 用 findFirst() 取**具体字段**的自定义文案替换它。
+        → 断言时 code 断 400，message 断具体文案。见 api/error_codes.yaml 的 assertion_discipline。
+
+    - "layer: 4"
+      name: 业务校验（Service 方法体内的书写顺序）
+      handler: service/impl/*.java
+      ordering_rule: >-
+        **按源码从上到下的书写顺序**。改代码里两个 if 的先后，就会改变叠加违规的返回值 ——
+        因此本层的顺序是"实现细节"，不是设计契约，**改动需同步本文件**。
+      common_gates_in_order:
+        - "requireActiveUser(currentUserId)：401（null）/ 404（已删）/ 423（禁用）"
+        - "requireVisibleUser(targetUserId)：404（null 或已删）；**禁用用户仍可见**"
+        - "自反操作校验：不能关注自己 / 不能给自己发私信 / 不能操作自己 / 不能举报自己"
+        - "目标存在性：POST_NOT_FOUND / COMMENT_NOT_FOUND / USER_NOT_FOUND / CONVERSATION_NOT_FOUND"
+        - "关系/状态校验：ALREADY_FOLLOWED / NOT_FOLLOWED / ALREADY_LIKED / NOT_LIKED / NOT_MUTUAL_FOLLOW / ALREADY_REPORTED / REPORT_ALREADY_HANDLED"
+        - "所有者校验：FORBIDDEN（删他人内容）/ NOT_CONVERSATION_MEMBER（非会话成员）"
+        - "内容有效性：EMPTY_POST / INVALID_IMAGE_URL / EMPTY_COMMENT（不可达）/ 消息内容为空"
+
+    - "layer: 5"
+      name: 数据库唯一键兜底
+      handler: GlobalExceptionHandler#handleDuplicateKey
+      mechanism: >-
+        Service 层的"先查再插"只是**快速失败**；并发下真正拦住重复数据的是数据库唯一键。
+        DuplicateKeyException 被按**索引名**翻译回与快速失败**相同**的业务码，
+        因此单线程与并发两条路径的对外契约一致。
+      mapping:
+        - {index: uk_username, error_code: USERNAME_EXISTS, code: 409}
+        - {index: uk_email, error_code: EMAIL_EXISTS, code: 409}
+        - {index: uk_follower_following, error_code: ALREADY_FOLLOWED, code: 409}
+        - {index: uk_post_user, error_code: ALREADY_LIKED, code: 409}
+        - {index: uk_users, error_code: CONFLICT, code: 409,
+           note: "会话并发创建。ConversationServiceImpl 会先 REQUIRES_NEW 重查并复用，正常不落到这里"}
+        - {index: uk_reporter_target, error_code: ALREADY_REPORTED, code: 409}
+        - {index: UNKNOWN, error_code: CONFLICT, code: 409,
+           caveat: "⚠️ 新增索引忘了登记时也走这里，日志会打 warn '未映射的唯一约束冲突'。见 issues.yaml C-06"}
+
+    - "layer: 6"
+      name: 未预期异常兜底
+      handler: GlobalExceptionHandler#handleException
+      code: 500
+      error_code: INTERNAL_ERROR
+      note: "业务用例**不应**断言 500（除 FILE-015 的路径穿越分支这一有意设计的例外）"
+
+  assertion_algorithm: |
+    给定一个"同时违反 N 条规则"的测试设计，断言码 = 被违反规则中 layer 最小者的 code：
+      violations = [(layer, code, error_code), ...]
+      expected   = sorted(violations, key=layer)[0]
+    若最小 layer 上有多个候选（同一层内），再按 layer 4 的 common_gates_in_order 顺序取先者。
+
+# ═══════════════════════════════════════════════════════════════
+# 2. 认证层压制业务层（本项目最反直觉的一组事实）
+# ═══════════════════════════════════════════════════════════════
+auth_shadows_service:
+  desc: >-
+    当 current_user 本身"有毛病"时，**业务代码根本不会被执行**，
+    所以 Service 里针对 currentUserId 的校验分支全是死代码。
+    AI 若按"读 Service 源码"来设计用例，会设计出永远拿不到预期码的用例。
+  verified_by: auth_layer_probe.mjs（2026-09-17 实测，7 项）
+
+  facts:
+    - "id: AS-01"
+      scenario: "账号已被逻辑删除，携带其旧 Token 访问受保护端点"
+      service_code_would_say: "USER_NOT_FOUND(404) —— requireActiveUser 的分支"
+      actual: "401 UNAUTHORIZED"
+      actual_source: "JwtAuthenticationFilter.java:65-67 → AuthInterceptor.java:61"
+      evidence: "auth_layer_probe A1 实测 401"
+      ai_impact: "🔴 不要生成'已注销用户访问 /users/me 应 404'的用例"
+
+    - "id: AS-02"
+      scenario: "账号已被禁用，携带其旧 Token 访问受保护端点"
+      service_code_would_say: "USER_DISABLED(423) —— requireActiveUser 的分支"
+      actual: "423 USER_DISABLED"
+      actual_source: "JwtAuthenticationFilter.java:68-69 → AuthInterceptor.java:61"
+      evidence: "validation_order_probe P3/P4/P6 实测 423"
+      nuance: >-
+        ⚠️ **结论码相同、来源不同**。同样是 423，但它出自**拦截器**（layer 2）而不是
+        requireActiveUser（layer 4）。后果：即便 body 里同时有非法字段，
+        返回的仍是 423 而非 400（实测 P3）。
+        → 若只照抄 endpoints.yaml 里"1. requireActiveUser(401/404/423)"的写法会得到
+        **错误的顺序认知**，进而在"禁用 + 非法参数"的组合上断言错。见 §5 已修正项 F-01。
+
+    - "id: AS-03"
+      scenario: "账号已被删除或禁用，携带其 Token 访问**白名单**端点"
+      actual: "200（按游客放行）"
+      actual_source: >-
+        AuthInterceptor.java:60 只在 `!whiteListed && currentUser == null` 时抛错；
+        白名单命中则直接放行，坏 Token 被**静默忽略**
+      evidence: "validation_order_probe P5（禁用→200）、auth_layer_probe A2（已删除→200）"
+      ai_impact: "🟠 白名单端点上的「坏 Token」用例断言的是 200，不是 401/423"
+
+    - "id: AS-04"
+      scenario: "路径参数 / 请求体里指向的用户已被逻辑删除"
+      actual: "404 USER_NOT_FOUND"
+      actual_source: "requireActiveUser / requireVisibleUser（layer 4），此处 **404 可达**"
+      evidence: "auth_layer_probe A4（关注）、A5（发私信）、A6（举报）实测均 404"
+      contrast: >-
+        与 AS-01 形成对照：**同一个 404 分支，参数来源决定它是否可达。**
+        currentUserId 来自 Token → 不可达；targetUserId 来自路径/请求体 → 可达。
+      ai_impact: "✅ 这种用例可以生成，且必须用「换个 userId」来构造，不能靠换 Token"
+
+  rule_of_thumb: >-
+    AI 判断"这个 404/423 分支到底可不可达"的捷径：
+    **看触发条件依赖的是"当前用户"还是"目标用户"。**
+    依赖当前用户 → 先被 layer 1/2 拦掉，业务分支不可达；
+    依赖目标用户 → 业务分支可达。
+
+# ═══════════════════════════════════════════════════════════════
+# 3. 叠加违规胜出表（按端点）
+# ═══════════════════════════════════════════════════════════════
+#
+# 表达方式：**以 rule_id 列出优先级**，而不是复述 code。
+# 每条 rule_id 都可到 rules/business_rules.yaml 或 test_cases/*.yaml 交叉核对，
+# validate.py 会校验它们真实存在。
+#
+# 端点级"完整 code 序列"见 api/endpoints.yaml 的 error_check_order 字段 —— 本文件不复制。
+stacked_violation_winners:
+  desc: >-
+    当同一请求同时违反下列规则时，**排在前面的胜出**。
+    只登记"确实可能被同时违反"的组合；不可同时成立的组合不登记。
+  endpoints:
+
+    - "endpoint: POST_AUTH_REGISTER"
+      winner_order: [AUTH-002, AUTH-001]
+      # AUTH-002 = 用户名格式/长度非法(400)；AUTH-001 = 用户名已占用(409)
+      reasoning: "格式非法的用户名走不到查重（Bean Validation 在 layer 3，查重在 layer 4）"
+      note: "username 与 email 同时占用时 → AUTH-001 胜（源码先查 username，AuthServiceImpl.java:47）"
+      verified: "api/endpoints.yaml error_check_order"
+
+    - "endpoint: POST_AUTH_LOGIN"
+      winner_order: [AUTH-005, AUTH-003, AUTH-004]
+      # AUTH-005 = 密码校验先于状态校验(401 而非 423)；AUTH-003 = 凭证错误(401)；AUTH-004 = 禁用登录(423)
+      reasoning: >-
+        "被禁用账号 + 错误密码" → 401（不是 423）：源码把 `user==null || !matches(password)`
+        合并成一个 if 放在状态校验之前。这是**有意设计**，目的是不暴露"该账号存在且被禁用"。
+      ai_impact: "🔴 极易猜错。不要凭常识认为「禁用就一定 423」"
+      verified: "api/endpoints.yaml critical_fact；AuthServiceImpl.java:83-90"
+
+    - "endpoint: PUT_USERS_ME_AVATAR"
+      winner_order: [AS-02, USER-004, USER-005, USER-001]
+      # AS-02 = 账号被禁用时拦截器先给 423；USER-004 = 前缀校验(400)；USER-005 = 近似串(400)
+      reasoning: >-
+        账号有问题 → 423（layer 2）压过一切参数问题；
+        账号正常 → Bean Validation（空 avatar / 超 255，layer 3）压过前缀校验（layer 4）。
+      verified: "validation_order_probe P1（活跃+空→400）、P3（禁用+空→423）、P4（禁用+合法→423）"
+      ordering_correction_ref: F-01
+
+    - "endpoint: POST_USERS_ID_FOLLOW"
+      winner_order: [FOL-001, FOL-002, FOL-003, FOL-004, FOL-005, FOL-006]
+      # FOL-001 不能关注自己 / FOL-002 重复关注 / FOL-003 目标不存在 / FOL-004 目标禁用 / ...
+      reasoning: >-
+        顺序 = 源码书写顺序：null → 关注自己(400) → requireActiveUser(自己) →
+        requireActiveUser(目标)(404/423) → 已关注(409) → insert 兜底(409)。
+        "关注自己 + 自己已被禁用" → 400 CANNOT_FOLLOW_SELF 胜
+        （因为自反校验在 requireActiveUser 之前，FollowServiceImpl.java:50-56）。
+      verification_needed: "关注自己 400 已有用例；「自己被禁用+关注自己」的组合未实测 → INFERRED"
+
+    - "endpoint: POST_MESSAGES"
+      winner_order: [MSG-015, MSG-016, MSG-017, SEC-003]
+      # MSG-015 DTO 校验先于互关 / MSG-016 接收者不存在先于互关 / MSG-017 给自己先于互关
+      reasoning: >-
+        完整链：Bean Validation(400) → 不能给自己(400) → 接收者 404/423 → 互关(403)。
+        **互关校验排在最后**，这是 2026-09-11 冻结规则刻意安排的顺序。
+      verified: "validation_order_probe P7/P8/P9 + tests/api/test_message_mutual_follow.py 第 10~14 条"
+      frozen_at: 2026-09-11
+
+    - "endpoint: POST_CONVERSATIONS"
+      winner_order: [CONV-014, SEC-003]
+      reasoning: "与 POST_MESSAGES 同构：Bean Validation → 自己(400) → 目标 404/423 → 互关(403)"
+      verified: "tests/api/test_conversation_mutual_follow.py 第 8~10 条"
+
+    - "endpoint: POST_POSTS"
+      winner_order: [POST-002, POST-003, POST-001, POST-004]
+      # POST-002 = @Size content≤1000(层3) / POST-003 = @Size images≤9(层3)
+      # POST-001 = 内容与图片同时为空(层4) / POST-004 = 图片 URL 前缀(层4)
+      reasoning: >-
+        layer 3 的 @Size 全部先于 layer 4。
+        "content 1001 字符 + 图片外链" → 400 PARAM_INVALID（@Size 先），不是 INVALID_IMAGE_URL。
+        "内容为空 + 图片外链" → 400 INVALID_IMAGE_URL（EMPTY_POST 不成立，因为有图片）。
+      verified: "api/endpoints.yaml error_check_order（含 TOO_MANY_IMAGES 不可达说明）"
+
+    - "endpoint: POST_REPORTS"
+      winner_order: [RPT-001, RPT-002, RPT-003]
+      reasoning: >-
+        Bean Validation（含 targetType @Max(3)）→ 目标存在性 404 → 举报自己 400 → 重复举报 409。
+        **注意 targetType=4 永远得到 PARAM_INVALID(400)**，Service 的 INVALID_TARGET_TYPE 分支不可达。
+      verified: "validation_order_probe P10 实测 400 PARAM_INVALID + api/endpoints.yaml unreachable_branch"
+      doc_conflict_ref: C-03
+
+    - "endpoint: PUT_ADMIN_USERS_ID_STATUS"
+      winner_order: [USER-014, USER-012, USER-013]
+      # USER-014 = "不能操作自己(400) 先于 目标是管理员(403)"
+      reasoning: >-
+        完整链：Bean Validation(status ∈ {0,1}) → 不能操作自己(400) → 目标存在性(404) →
+        目标是管理员(403)。实测 status=9 且 target=self → 400 PARAM_INVALID（Bean Validation 胜），
+        而 status=0 且 target=self → 400 CANNOT_OPERATE_SELF。
+      verified: "validation_order_probe P11、P12"
+      known_gap: "USER-013（不能禁用另一个管理员）HTTP 层不可达 → SEC-004 缺口"
+
+    - "endpoint: PUT_ADMIN_REPORTS_ID_HANDLE"
+      winner_order: [RPT-004, RPT-007, RPT-006, RPT-005]
+      # RPT-004 已处理不可重复处理(409) / RPT-007 驳回不能带处置动作(400)
+      # RPT-006 action 与 target 不匹配(400) / RPT-005 action 字符串非法(400)
+      reasoning: >-
+        Bean Validation → 举报不存在(400,文案被覆盖) → 非 PENDING(409) → 驳回+动作(400) →
+        动作与目标不匹配(400) → 执行处置 → 更新。
+        "非法 action 字符串 + 已处理" → 409 胜（非 PENDING 检查在 parseAction 之前）。
+      verified: "api/endpoints.yaml error_check_order（逐行核对 ReportServiceImpl.java:160-195）"
+
+# ═══════════════════════════════════════════════════════════════
+# 4. 死分支清单（生成了也拿不到预期码 → 不要生成）
+# ═══════════════════════════════════════════════════════════════
+dead_branches:
+  desc: >-
+    这些分支在源码里存在，但**HTTP 层没有任何输入能触达**。
+    AI 生成针对它们的用例必然是"永远失败"的用例（不是缺陷，是测试设计错误）。
+    本清单与 test_cases/README.md §已知缺口、issues.yaml 的 MISSING 段保持同一口径。
+  items:
+    - "id: DB-01"
+      branch: "EMPTY_COMMENT(400)"
+      location: ErrorCode.EMPTY_COMMENT
+      reason: >-
+        全库无任何引用（死枚举）。空评论由 CommentCreateRequest 的 @NotBlank 在 layer 3
+        拦为 PARAM_INVALID(400)，文案"评论内容不能为空"。
+      actual_code: "400 PARAM_INVALID"
+      corresponding_issue: C-02
+      ai_instruction: "断言 400 + message='评论内容不能为空'，**不要**断言 EMPTY_COMMENT 这个枚举名"
+
+    - "id: DB-02"
+      branch: "INVALID_TARGET_TYPE(400) —— targetType=4 分支"
+      location: ReportServiceImpl.java:74-76
+      reason: "CreateReportRequest 的 @Max(3) 在 layer 3 先拦为 PARAM_INVALID"
+      actual_code: "400 PARAM_INVALID，文案'举报目标类型只能是 1、2 或 3'"
+      evidence: "validation_order_probe P10 实测"
+      corresponding_issue: C-03
+
+    - "id: DB-03"
+      branch: "CANNOT_DISABLE_ADMIN(403) —— 管理员禁用另一个管理员"
+      location: UserServiceImpl.java:223-225
+      reason: >-
+        种子只有 1 个管理员（admin id=1）。管理员操作自己 → USER-014 的
+        CANNOT_OPERATE_SELF(400) 先命中（layer 4 内先书写）。无第二个管理员 → 无输入可触达。
+      corresponding_issue: M-01
+      registered_gap: SEC-004
+      to_cover: "补第二个管理员种子账号，或用直接改库/直接调 Service 的集成测试"
+
+    - "id: DB-04"
+      branch: "TOO_MANY_IMAGES(400) —— Service 层图片数校验"
+      location: PostServiceImpl.java:73-75
+      reason: "PostCreateRequest 的 @Size(max=9) 在 layer 3 先拦为 PARAM_INVALID"
+      mitigation: >-
+        ✅ 两个分支的 message 文案**字面相同**（"最多只能上传 9 张图片"），
+        所以断言"400 + 该文案"两种情况都通过，不构成误判风险。
+      note: "与 DB-02 不同：DB-02 的文案不同所以会误判，DB-04 不会"
+
+    - "id: DB-05"
+      branch: "requireActiveUser / requireVisibleUser 的 423 分支（当 userId 来自 Token 时）"
+      location: UserServiceImpl.java:125-127
+      reason: "layer 2 的拦截器已先行拒绝 → layer 4 不执行"
+      contrast: "但当 userId 来自路径参数/请求体时该分支**可达**（见 auth_shadows_service AS-04）"
+
+    - "id: DB-06"
+      branch: "requireActiveUser 的 401（userId == null）分支"
+      location: UserServiceImpl.java:117-119
+      reason: "@CurrentUser 解析出的 userId 为 null 时，layer 2 已给 401"
+      ai_instruction: "不要为它单独设计用例"
+
+    - "id: DB-07"
+      branch: "NOTIFICATION type=4 (MESSAGE) 相关行为"
+      location: NotificationTypeEnum.MESSAGE
+      reason: "标注 @Deprecated，NotificationTypeEnum.isValid() 明确排除 4；私信不写通知表（避免与消息未读重复）"
+      ai_instruction: "不要生成'发私信产生通知'用例 —— 实际不产生"
+
+# ═══════════════════════════════════════════════════════════════
+# 5. 对 api/endpoints.yaml 的顺序性修正记录（2026-09-17）
+# ═══════════════════════════════════════════════════════════════
+#
+# 抽取本文件时发现 endpoints.yaml 有 4 处顺序/性质描述不准确，已就地修正。
+# 记录在此以便追溯"为什么改了"。
+corrections_applied:
+  - "id: F-01"
+    target: api/endpoints.yaml → PUT_USERS_ME_AVATAR.error_check_order
+    was: '["1. requireActiveUser(401/404/423)", "2. Bean Validation(400)", "3. 前缀校验(400)"]'
+    now: "改为 layer 2（拦截器 401/423）→ layer 3（Bean Validation 400）→ layer 4（前缀校验 400）"
+    why: >-
+      原写法把拦截器给出的 423 归因成 requireActiveUser，并把 423 排在 400 之前，
+      会让人误以为"Service 先于 Bean Validation"。实测（P1/P3/P4）：
+      **活跃用户 + 空 avatar → 400**，证明 Bean Validation 先于 Service；
+      禁用用户的 423 来自拦截器（更早的一层）。结论码巧合相同，但机制与顺序都不同。
+    evidence: validation_order_probe P1/P3/P4
+
+  - "id: F-02"
+    target: api/endpoints.yaml → PUT_ADMIN_USERS_ID_STATUS.error_check_order
+    was: "只写了 3 步，缺 Bean Validation"
+    now: "补为 0. Bean Validation(status∈{0,1}) → 1. 不能操作自己 → 2. 目标存在 → 3. 目标是管理员"
+    why: 'status=9 + target=self 实测返回 400 PARAM_INVALID，而非 CANNOT_OPERATE_SELF'
+    evidence: validation_order_probe P11
+
+  - "id: F-03"
+    target: api/endpoints.yaml → DELETE_POSTS_ID.side_effects
+    was: '**物理删除** type=2(点赞)/type=3(评论) 且 post_id 匹配的 notification'
+    now: "**逻辑删除**（Notification extends BaseEntity，Mapper.delete 实为 UPDATE deleted=1）"
+    why: >-
+      写错会让 AI 生成"查库断言该行已消失"的 SQL 断言，而实际该行仍在且 deleted=1。
+    evidence: >-
+      Notification.java:18 `extends BaseEntity`；BaseEntity.java:42 `@TableLogic`；
+      2026-09-17 实测：取消关注后 SELECT ... FROM notification WHERE user_id=26 AND actor_id=25 AND type=1
+      → 返回 (id=38, deleted=1)，行**存在**。
+    contrast: "同一操作里的 follow 行则是**物理删除**（实测 count=0），两者不同，勿混"
+
+  - "id: F-04"
+    target: api/endpoints.yaml → PUT_ADMIN_REPORTS_ID_HANDLE.related_rules
+    was: "[SRCH-004, SRCH-005, SRCH-006, SRCH-007, SRCH-008]"
+    now: "[RPT-004, RPT-005, RPT-006, RPT-007, RPT-008]"
+    why: >-
+      原引用明显是复制粘贴错误：SRCH 是**搜索**域（对应 test_search.py），且
+      business_rules.yaml 中**不存在任何 SRCH-* 规则**，属悬空引用。
+      举报处置的规则在 business_rules.yaml 的 report_rules 段，ID 为 RPT-004~010。
+    detected_by: "validate.py 的悬空引用检查（本文件编写时首次运行即报出）"
+
+# ═══════════════════════════════════════════════════════════════
+# 6. 历史误判（踩过的坑，别再踩）
+# ═══════════════════════════════════════════════════════════════
+historical_misjudgments:
+  - "id: HM-01"
+    wrong_conclusion: '"非互关 + 空内容" → 403 NOT_MUTUAL_FOLLOW'
+    actual: "400（消息内容不能为空）"
+    root_cause: "DTO 的 @NotBlank 在 layer 3 执行，互关校验在 layer 4"
+    detected: 2026-09-14
+    fixed_in: >-
+      tests/api/test_message_mutual_follow.py::test_dto_validation_precedes_mutual_check；
+      api/endpoints.yaml 的 critical_fact_corrected；
+      docs/testing/TEST_COVERAGE_MATRIX.md §7 末行
+    lesson: >-
+      **读到 Service 里有 403 就以为 403 会赢**是最典型的顺序性错误。
+      生成前务必先确认这条规则在 layer 3 有没有对应的 DTO 注解。
+
+  - "id: HM-02"
+    wrong_conclusion: '"头像 URL 不校验 /uploads/ 前缀，不要写外链 400 的断言"'
+    actual: "400 INVALID_IMAGE_URL（UserServiceImpl.java:101-104 明确校验）"
+    root_cause: "docs/api/users.md 停留在 BUG-005 修复（2026-09-14）之前的旧描述"
+    related_rule: USER-004
+    lesson: "docs/api/*.md 有滞后，顺序类事实以源码 + 实测为准"
+
+  - "id: HM-03"
+    wrong_conclusion: '"待测代码里存在 EMPTY_COMMENT，所以空评论断言 EMPTY_COMMENT"'
+    actual: "400 PARAM_INVALID + 文案'评论内容不能为空'"
+    root_cause: "EMPTY_COMMENT 是死枚举（全库无引用）"
+    related_issue: C-02
+    lesson: "错误码枚举里**存在**不等于**可达**。见 api/error_codes.yaml 与 §4 死分支清单"
+
+# ═══════════════════════════════════════════════════════════════
+# 7. AI 使用本文件的检查点
+# ═══════════════════════════════════════════════════════════════
+ai_checklist:
+  - "设计「叠加违规」用例前，先按 §1 assertion_algorithm 算出预期码，不要凭常识挑"
+  - "涉及 currentUser 的 404/423 分支，先查 §2 判断是否被认证层遮蔽"
+  - "涉及错误码时，先查 §4 死分支清单，确认该分支可触达"
+  - "端点级完整 code 序列去 api/endpoints.yaml 的 error_check_order 取，本文件不复制"
+  - "改动 Service 里校验语句的先后，必须同步 §3 与 §5 并重跑两个探针脚本"

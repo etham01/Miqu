@@ -1,0 +1,298 @@
+# 浏览器回归执行契约
+#
+# 用途：说明**哪些缺陷只能用真实浏览器测、怎么测、生成时要注意什么**。
+#
+# 为什么必须单独成文：
+#   本项目存在一整类缺陷，**后端每次返回都是对的** ——
+#   错在前端"筛选条件变了却没把新请求发出去"，导致**标签与数据不一致**。
+#   pytest 打 HTTP 永远看不见这类问题（它直接调接口，不经过前端）。
+#   所以这一层不能改用 pytest，也不能被"用 pytest 补一下"替代。
+#
+# 消费者：
+#   LLM               → 判断某条用例该不该放在浏览器层；生成时必须按本文件的断言 ID 组织
+#   CoverageValidator → 统计前端状态层的覆盖（唯一来源）
+#   执行器            → 按本文件的启动步骤与退出码约定运行
+#
+# 真相来源：tests/browser_regression.mjs（333 行）｜tests/browser_check.mjs｜tests/README.md
+# confidence: CONFIRMED
+# verified_at: 2026-09-16（15 项断言全部 PASS）
+
+meta:
+  generated_at: 2026-09-17
+  primary_script: tests/browser_regression.mjs
+  secondary_script: tests/browser_check.mjs
+  assertion_count: 15
+  collected_by_pytest: false
+  not_collected_reason: >-
+    pytest.ini 的 testpaths=api，只收集 test_*.py；
+    本脚本是 .mjs，因此**它红不会污染 pytest 的绿灯**。这是有意的隔离。
+
+# ═══════════════════════════════════════════════════════════════
+# 1. 什么时候必须用浏览器层
+# ═══════════════════════════════════════════════════════════════
+applicability:
+  must_use_browser:
+    - id: AB-01
+      kind: 前端状态一致性
+      symptom: "筛选条件（tab / keyword / type）变了，UI 标签变了，但列表数据还是旧的"
+      root_cause: >-
+        `if (loading.value) return` 这类 loading 守卫会丢弃**用户的新查询**，
+        而不只是丢弃**过期响应**。正确写法是请求序号：只丢过期响应，不丢新查询。
+      project_evidence: "2026-09-14 在 HomeView / SearchView / NotificationView 三处复现（BUG-002/003/004）"
+      why_not_pytest: "后端每次返回都正确；缺陷在网络请求的**发出侧**"
+
+    - id: AB-02
+      kind: UI 降级行为
+      symptom: "取不到的图片应降级为首字母占位，而不是留一枚永久破图"
+      project_evidence: "BUG-006（UserAvatar.vue 缺 @error 兜底）"
+      why_not_pytest: "jQuery 式的 <img> 解码失败是浏览器行为；HTTP 层看不出"
+
+    - id: AB-03
+      kind: 固定回归守卫
+      symptom: "曾被怀疑有缺陷、实测证伪的行为，需要防止将来改坏"
+      project_evidence: "BUG-001（取消关注后关注流是否残留 —— **本来就是对的**）"
+      why_keep: "作为守卫保留：它证明这条链路是通的，改动时若挂掉会立刻暴露"
+
+  cannot_use_browser:
+    - "多用户并发浏览器会话同时操作 —— 当前脚本只做**单线程时序竞态**（靠人为延迟放大窗口），无多浏览器编排。属未验证缺口。"
+    - "前端单元/组件测试 —— 项目未引入 Vitest / Jest，**有意取舍**（见 issues.yaml M-03）"
+    - "登录/权限的接口契约 —— 那是 pytest 的职责"
+
+  decision_rule: >-
+    AI 判断标准只有一条：
+    **「如果后端返回完全正确，这个问题还会发生吗？」**
+    会 → 放浏览器层；不会 → 放 pytest 或 JUnit。
+    注意：**不要**把浏览器层用例改写成 pytest —— 那会失去唯一能发现该缺陷的能力。
+
+# ═══════════════════════════════════════════════════════════════
+# 2. 运行环境（三个环境变量 + 一个 IPv6 坑）
+# ═══════════════════════════════════════════════════════════════
+environment:
+  prerequisites:
+    - "后端必须起着（默认 8081）"
+    - "前端必须起着：cd frontend && npm run dev（默认 5173）"
+    - "本机已装 Chrome（脚本用 channel: 'chrome'，**不需要** npx playwright install）"
+  env_vars:
+    - {name: MIQU_API_URL, default: "http://127.0.0.1:8081", desc: "被测后端地址"}
+    - {name: MIQU_FRONT_URL, default: "http://localhost:5173", desc: "被测前端地址"}
+    - name: MIQU_SLOW_MS
+      default: 3000
+      desc: "**人为放慢请求的毫秒数** —— 用来稳定复现「还在飞就点了下一个筛选条件」的窗口。宁可放大窗口，也不要靠运气复现竞态"
+  run_command: |
+    export NO_PROXY=localhost,127.0.0.1 no_proxy=localhost,127.0.0.1
+    node tests/browser_regression.mjs
+  ipv6_pitfall:
+    critical: >-
+      🔴 **前端必须用 `localhost`，不能用 `127.0.0.1`。**
+      Vite 起在 5173 后**只监听 `::1`（IPv6）**，
+      `curl http://127.0.0.1:5173` 返回 000，而 `http://localhost:5173` 正常。
+      → 这就是为什么 MIQU_FRONT_URL 的默认值写的是 localhost，而 API 用的是 127.0.0.1。
+  playwright_loading:
+    mechanism: >-
+      脚本用 createRequire 依次尝试 'playwright'、'D:/tools/playwright/'、'C:/tools/playwright/'。
+      本机 playwright 装在 D:/tools/playwright/。
+    launch: "chromium.launch({ channel: 'chrome', headless: true })"
+    failure_code: "三个位置都加载不到 → 打印安装指引并 process.exit(2)"
+  exit_codes:
+    - {code: 0, meaning: "全部断言通过"}
+    - {code: 1, meaning: "有断言失败"}
+    - {code: 2, meaning: "环境不可用（playwright 加载失败 / 前后端未启动）"}
+    - {code: 3, meaning: "脚本未捕获异常"}
+
+# ═══════════════════════════════════════════════════════════════
+# 3. 断言组织的约定（生成时必须遵守）
+# ═══════════════════════════════════════════════════════════════
+conventions:
+  assertion_api:
+    sig: "assert(id, title, ok, evidence)"
+    behavior: "打印 'PASS/FAIL  [id] title'，并把结果累积到 results 数组；**不抛异常**（跑完所有断言再统一决定退出码）"
+    evidence_param: "可选的补充信息字符串（如实测到的 tab 名、请求 URL 列表），失败时用于定位"
+  id_scheme:
+    pattern: "<BUG编号>.<字母序号>"
+    examples: ["BUG-001.a", "BUG-002.b", "BUG-006.c"]
+    rationale: >-
+      与 test_cases/*.yaml 的 `browser` 字段对齐：
+      test_cases 用 `browser: BUG-002.a` 指向本脚本的断言 ID（而 **不是** pytest 的"文件::函数名"）。
+      → 生成新断言时必须沿用一个已有前缀，或在 issues.yaml 登记新前缀。
+  group_pattern:
+    desc: "每个缺陷一组，组内按 setup → 触发 → 断言 的顺序"
+    typical_group:
+      - "console.log 组标题"
+      - "API 造前置数据（用 api() 辅助函数直接打后端，不走 UI）"
+      - "page.goto / 点击 / 输入"
+      - "若干 assert(...)"
+  api_helper: "脚本内自带 api(method, path, {token, body}) 辅助函数，用 fetch 直连后端造数据 —— **不经过 UI**"
+
+# ═══════════════════════════════════════════════════════════════
+# 4. 现有 15 项断言（覆盖矩阵）
+# ═══════════════════════════════════════════════════════════════
+existing_assertions:
+  total: 15
+  groups:
+    - id: BUG-001
+      count: 4
+      title: 取消关注后关注流不残留
+      kind: 固定回归守卫
+      state: "**已证伪** —— 行为本来就是对的，保留为守卫"
+      assertions:
+        - {id: BUG-001.a, assert: "关注期间能在「我的关注」看到 B 的动态"}
+        - {id: BUG-001.b, assert: "取消关注已落库（followedByMe === false）"}
+        - {id: BUG-001.c, assert: "取消关注后「我的关注」不再出现 B 的动态"}
+        - {id: BUG-001.d, assert: "切到「我的关注」确实**重新请求了** tab=following（不是拿缓存充数）"}
+      yaml_ref: "见 workflows/workflows.yaml → WF-06"
+
+    - id: BUG-002
+      count: 3
+      title: 首页 tab 高亮与实际列表必须一致
+      kind: 前端状态一致性（缺陷族）
+      trigger: "首屏请求仍在飞时切「我的关注」"
+      assertions:
+        - {id: BUG-002.a, assert: "切 tab 后高亮为「我的关注」"}
+        - {id: BUG-002.b, assert: "切 tab 后**补发了** tab=following 请求"}
+        - {id: BUG-002.c, assert: "渲染条数与关注流一致（未把最新动态当关注流展示）"}
+
+    - id: BUG-003
+      count: 3
+      title: 搜索关键词与结果必须一致
+      kind: 前端状态一致性（缺陷族）
+      trigger: "首次请求在飞时换关键词再搜"
+      assertions:
+        - {id: BUG-003.a, assert: "换关键词后**重新发起**了搜索请求"}
+        - {id: BUG-003.b, assert: "页面结果与**当前**关键词一致"}
+        - {id: BUG-003.c, assert: "清空关键词后，仍在飞的**旧响应不得**把已清空的列表重新填上"}
+
+    - id: BUG-004
+      count: 2
+      title: 通知类型筛选必须生效
+      kind: 前端状态一致性（缺陷族）
+      trigger: "列表在飞时切「点赞」类型"
+      assertions:
+        - {id: BUG-004.a, assert: "切类型后补发了带 type=2 的请求"}
+        - {id: BUG-004.b, assert: "高亮「点赞」时列表只含点赞通知"}
+
+    - id: BUG-006
+      count: 3
+      title: 头像加载失败 → 降级为首字母占位
+      kind: UI 降级
+      trigger: "把头像设为一个**前缀合法但磁盘上不存在**的 /uploads/ 路径"
+      assertions:
+        - {id: BUG-006.a, assert: "造出一个指向不存在文件的头像（PUT 接口返回 200）"}
+        - {id: BUG-006.b, assert: "页面上不再有解码失败的 <img> 头像"}
+        - {id: BUG-006.c, assert: "取不到的头像降级成了首字母占位"}
+      setup_trick: >-
+        ✅ 这个 setup 依赖 `PUT /users/me/avatar` **不校验文件是否真的存在**（BUG-008，有意保留）。
+        前缀必须是 /uploads/ 才不会被 BUG-005 的前缀校验拦下。
+
+  yaml_registration:
+    location: test_cases/security_and_concurrency.yaml → ui_race_rules
+    registered_ids: "CONC-008 ~ CONC-011"
+    mechanism: '这些条目用 `browser` 字段（而非 `pytest` 字段）指向本脚本的断言 ID'
+
+# ═══════════════════════════════════════════════════════════════
+# 5. 生成模板
+# ═══════════════════════════════════════════════════════════════
+templates:
+  - id: BT-01
+    name: 新增一个前端状态一致性断言组
+    code: |
+      // ============================================================
+      // BUG-0XX：<一句话说清"什么条件下，UI 与数据必须同源">
+      // ============================================================
+      console.log('\n[BUG-0XX] <组标题>')
+
+      {
+        // 1) 用 API 造前置数据（不走 UI —— 保持 setup 快速且确定）
+        const token = await loginAs('test001')
+        const before = await api('GET', '/api/posts?tab=latest&page=1&size=10', { token })
+
+        // 2) 打开页面，并在**请求仍在飞**时立刻触发筛选变更
+        const page = await browser.newPage()
+        const reqs = []
+        page.on('request', (r) => { if (r.url().includes('/api/posts')) reqs.push(r.url()) })
+
+        await page.goto(`${WEB}/`, { waitUntil: 'domcontentloaded' })
+        await page.getByText('我的关注').click()          // 不等首屏加载完就点
+
+        // 3) 断言：UI 选中态 与 数据来源 必须一致
+        const active = await page.locator('.tab.active').innerText()
+        assert('BUG-0XX.a', '切 tab 后高亮为「我的关注」', active.includes('我的关注'), `高亮=${active}`)
+
+        const askedFollowing = reqs.some((u) => u.includes('tab=following'))
+        assert('BUG-0XX.b', '切 tab 后补发了 tab=following 请求', askedFollowing, reqs.join(' | ') || '(无)')
+
+        await page.close()
+      }
+    notes:
+      - "不等首屏加载完就触发下一次交互 —— 这是复现竞态的关键，配合 MIQU_SLOW_MS 放大窗口"
+      - "监听 request 事件来验证「请求到底发出去了没有」，这是本脚本的核心手法"
+      - "每组用具名断言 ID，便于 test_cases/*.yaml 用 browser 字段引用"
+
+  - id: BT-02
+    name: 新增一个 UI 降级断言组
+    code: |
+      console.log('\n[BUG-0XX] <降级场景>')
+      {
+        // 用"合法前缀 + 不存在的文件"造出取不到的图片
+        const token = await loginAs('test001')
+        const missing = `/uploads/image/2026/09/${Date.now().toString(16)}.jpg`
+        const put = await api('PUT', '/api/users/me/avatar', { token, body: { avatar: missing } })
+        assert('BUG-0XX.a', '造出一个指向不存在文件的头像', put.code === 200, `code=${put.code}`)
+
+        const page = await browser.newPage()
+        await page.goto(`${WEB}/profile`, { waitUntil: 'networkidle' })
+
+        const broken = await page.locator('img').evaluateAll(
+          (imgs) => imgs.filter((i) => i.complete && i.naturalWidth === 0).length)
+        assert('BUG-0XX.b', '页面上不再有解码失败的 <img>', broken === 0, `broken=${broken}`)
+
+        const fallback = await page.locator('.avatar-fallback').count()
+        assert('BUG-0XX.c', '降级成了首字母占位', fallback > 0, `fallback=${fallback}`)
+        await page.close()
+      }
+
+# ═══════════════════════════════════════════════════════════════
+# 6. 反模式
+# ═══════════════════════════════════════════════════════════════
+anti_patterns:
+  - id: BAP-01
+    wrong: "把前端状态一致性的用例改写成 pytest（直接打接口断言数据）"
+    why: "后端返回永远是对的 —— pytest 版本会**永远绿**，失去发现缺陷的能力"
+    right: "保留在浏览器层"
+  - id: BAP-02
+    wrong: "用 127.0.0.1 访问前端"
+    why: "Vite 只监听 IPv6 的 ::1，会连接失败并误判为「前端挂了」"
+    right: "用 localhost"
+  - id: BAP-03
+    wrong: "等页面完全加载完再触发筛选变更"
+    why: "竞态窗口已关闭，测不出问题（会得到假绿）"
+    right: "请求仍在飞时立刻交互，并用 MIQU_SLOW_MS 放大窗口"
+  - id: BAP-04
+    wrong: "只断言最终 UI 状态，不检查请求是否发出"
+    why: "无法区分「数据恰好相同」与「确实重新取了数」"
+    right: "监听 request 事件，像 BUG-001.d / BUG-002.b 那样断言请求确实发出"
+  - id: BAP-05
+    wrong: "断言固定像素/固定文案快照"
+    why: "与项目关注的「状态同源性」无关，且极易碎"
+    right: "断言「高亮与数据同源」这类语义不变量"
+  - id: BAP-06
+    wrong: "期望浏览器层发现接口契约错误（如 code 应为 403）"
+    why: "那是 pytest/JUnit 的职责，浏览器层做这个只是慢且脆"
+    right: "接口契约问题留在 pytest"
+
+# ═══════════════════════════════════════════════════════════════
+# 7. 相关脚本
+# ═══════════════════════════════════════════════════════════════
+related_scripts:
+  - {path: tests/browser_regression.mjs, purpose: "15 项断言的状态一致性回归（主）", asserts: 15}
+  - {path: tests/browser_check.mjs, purpose: "页面走查：控制台报错 + 未捕获异常（辅助，快速冒烟）"}
+  - {path: tests/e2e_walkthrough.py, purpose: "端到端真实链路走查（Python，需后端已启动）"}
+  - {path: .workbuddy/tools/avatar_diagnose.mjs, purpose: "头像问题的只读探针"}
+  - {path: .workbuddy/tools/avatar_broken_fallback_probe.mjs, purpose: "破图无兜底的复现探针"}
+
+ai_checklist:
+  - "先按 §1 decision_rule 判断：后端返回正确时这个问题还会发生吗？会 → 放这里"
+  - "断言 ID 沿用 `<BUG编号>.<字母>` 格式，并在 test_cases 的 browser 字段登记"
+  - "前端 URL 必须用 localhost（IPv6 坑）"
+  - "不要等页面加载完再交互（会得到假绿）"
+  - "监听 request 事件来证明「请求确实发出」"
+  - "不要把它改写成 pytest"

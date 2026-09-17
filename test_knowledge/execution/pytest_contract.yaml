@@ -1,0 +1,468 @@
+# pytest 执行契约
+#
+# 用途：让 AI 生成的用例**第一次就能跑通**。这是"可执行性"的关键文件 ——
+#       它不是描述"项目有什么测试"，而是规定"你生成的代码必须长什么样"。
+#
+# 为什么必须单独成文：
+#   AI 默认会用"标准的 requests 写法"：`requests.get(url)`、`assert resp.status_code == 403`、
+#   `assert resp.json()["data"]["total"] == 21`。
+#   这三条在本项目**全是错的**：
+#     · 断言 status_code 恒真（XC-001）
+#     · 绝对计数第二次运行就挂（XC-007）
+#     · 没有 Token 会全部 401
+#   本文件把这些坑固化成"照抄就能用"的模板。
+#
+# 消费者：LLM（生成代码）｜Pydantic（校验 fixture 名与字段名真实存在）｜执行器（直接运行）
+#
+# 真相来源（逐行读取）：
+#   tests/conftest.py（夹具全集）
+#   tests/utils/client.py（ApiClient 与 ApiResponse）
+#   tests/pytest.ini（markers / testpaths / addopts）
+#   tests/api/*.py（实际写法）
+#   docs/testing/MIQU_TEST_SYSTEM.md §6（硬纪律）
+#
+# confidence: CONFIRMED
+# verified_at: 2026-09-17（250 条用例全部 collected 成功）
+
+meta:
+  generated_at: 2026-09-17
+  suite_size: 250
+  file_count: 13
+  location: tests/
+  collection: "pytest --collect-only 实测 250 tests collected"
+
+# ═══════════════════════════════════════════════════════════════
+# 1. 运行环境（生成代码时必须假设的事实）
+# ═══════════════════════════════════════════════════════════════
+environment:
+  base_url:
+    default: http://localhost:8081
+    override: ["--base-url 命令行参数", "MIQU_BASE_URL 环境变量"]
+    source: tests/conftest.py:26,45-51
+    port_reason: "8081 而非 8080 —— 本机 8080 被 Windows 服务 ApplicationWebServer.exe 占用"
+  auth: "JWT，Authorization: Bearer <token>；有效期 604800 秒"
+  database:
+    kind: MySQL
+    name: miqu
+    reset: |
+      mysql -u root -p < database/schema.sql
+      mysql -u root -p < database/data.sql
+    note: "pytest **不需要**每次都重置（套件幂等）；JUnit 需要"
+  prerequisites:
+    - "后端必须已启动（conftest 的 ensure_backend_running 会探活，未启动则 pytest.exit(1)）"
+    - "启动命令：cd backend && mvn spring-boot:run（默认 8081）"
+    - "⚠️ 本机 mvn 命令本身不可用，需用包装脚本 .workbuddy/tools/mvn.sh；启动 jar 要显式 --server.port=8081 并 unset SERVER__PORT"
+  proxy_warning:
+    critical: >-
+      🔴 运行环境里有 HTTP_PROXY=127.0.0.1:16668。**不设置 NO_PROXY 会导致连 localhost 都走代理而失败**。
+    must_set: "export NO_PROXY=localhost,127.0.0.1 no_proxy=localhost,127.0.0.1"
+  python:
+    usable: "/d/tools/Python/python.exe（系统 Python 3.12，**带 pytest 与 requests**）"
+    not_usable: "托管 python 3.13 **没有** pytest"
+    windows_path_note: '给 Windows 版 python 传路径要用 D:/... 形式（不认 /d/...）'
+  run_commands:
+    all: "cd tests && python -m pytest"
+    smoke: "cd tests && python -m pytest -m smoke"
+    read_only: "cd tests && python -m pytest -m read"
+    single_file: "cd tests && python -m pytest api/test_post.py -v"
+  pytest_ini:
+    testpaths: api
+    python_files: "test_*.py"
+    addopts: "-v --tb=short --strict-markers --color=yes"
+    markers:
+      - {name: smoke, desc: 冒烟用例，覆盖主流程，应始终通过}
+      - {name: read, desc: 只读用例，不修改任何数据，可重复执行}
+      - {name: write, desc: 写入用例，会在数据库中留下记录}
+    strict_markers_warning: >-
+      `--strict-markers` 已开启：使用**未登记的 marker 会直接报错**。
+      只能用上面三个。
+
+# ═══════════════════════════════════════════════════════════════
+# 2. 硬纪律（红线，违反即"把测试改绿"，项目明令禁止）
+# ═══════════════════════════════════════════════════════════════
+hard_rules:
+  - id: HR-01
+    rule: "不许把测试改绿。"
+    forbidden:
+      - "删除测试"
+      - "加 skip / xfail"
+      - "放宽断言（如把 == 403 改成 in (403, 500)）"
+      - "捕获异常后忽略"
+      - "改测试数据掩盖 Bug"
+    correct: "测试红了先查被测代码，再查测试；顺序不能反"
+    source: docs/testing/MIQU_TEST_SYSTEM.md §6 第 1 点
+
+  - id: HR-02
+    rule: "断言用**差值**，不用绝对值。"
+    wrong: 'assert admin_client.get("/api/admin/stats").data["userTotal"] == 21'
+    right: |
+      before = admin_client.get("/api/admin/stats").data["userTotal"]
+      anonymous.register(f"qa{unique_suffix}")
+      after = admin_client.get("/api/admin/stats").data["userTotal"]
+      assert after == before + 1
+    sole_exception: "针对**种子数据样本**的绝对值断言（post 1 有 9 张图；见 data/seed_data.yaml → designed_assertion_baselines）"
+    why: "写入真实落库、且**没有删除用户的接口**，库会随运行次数增长"
+    source: docs/testing/MIQU_TEST_SYSTEM.md §6 第 2 点
+
+  - id: HR-03
+    rule: "写数据只用**当次运行新建的随机用户**（fresh_user / fresh_users），不要改种子账号。"
+    why: "① 用户名必须随机，否则第二次运行撞 uk_username；② 种子账号是 JUnit 绝对值断言的基准"
+    forbidden_targets:
+      - "改任何种子账号的密码（无恢复接口）"
+      - "禁用 admin（会锁死管理端测试）"
+      - "删除种子动态 post 1/2/3"
+      - "改 test001 ↔ test002 的互关关系"
+    source: tests/README.md §两条纪律 2
+
+  - id: HR-04
+    rule: "种子绝对值断言失效时的正确处理是**重置数据库**，不是改断言。"
+    source: docs/testing/MIQU_TEST_SYSTEM.md §6 第 4 点
+
+  - id: HR-05
+    rule: "**永远不要断言 HTTP 状态码**。"
+    wrong: "assert response.status_code == 403"
+    right: "assert response.code == 403"
+    sole_exception: >-
+      /uploads/** 静态资源缺失时是**真 HTTP 404**；
+      唯一合法的写法是 `assert response.http_status == 404`
+    source: 见 api/conventions.yaml → http_status_policy
+
+  - id: HR-06
+    rule: "程序化探测**不要用 shell 里批量 curl**。"
+    why: >-
+      本机 bash 工具的输出管道会截断/损坏长字符串（180 字符的 JWT 打印出来只剩 22 字符），
+      批量 curl 还会假报 "client returned ERROR on write"，看起来像远端全挂，实际是工具假象。
+    correct: "用 Node 的 fetch 在**单进程**里顺序验证；或单个 curl 写**真实文件**后再用 Read 读"
+    tool_precedent: [.workbuddy/tools/validation_order_probe.mjs, .workbuddy/tools/auth_layer_probe.mjs]
+
+# ═══════════════════════════════════════════════════════════════
+# 3. 夹具全集（只能用这里列出的名字）
+# ═══════════════════════════════════════════════════════════════
+fixtures:
+  desc: "⚠️ fixture 名写错会直接报 fixture not found。生成代码前先在这里核对拼写。"
+  scope_note: "**注意作用域**：session 级的夹具是共享的，函数级的是每个用例新建的。"
+  items:
+    - {name: base_url, scope: session, source: conftest.py:45, returns: "str", desc: "被测后端地址，已 rstrip('/')"}
+    - {name: ensure_backend_running, scope: session, autouse: true, source: conftest.py:54,
+       desc: "开跑前 GET /api/health 探活；不可达则 pytest.exit(1) 并给出明确指引（避免一屏「连接被拒绝」）"}
+    - {name: anonymous, scope: function, source: conftest.py:77, returns: ApiClient,
+       desc: "**未登录**客户端",
+       critical: "🔴 **必须是函数级作用域**。ApiClient.login() 会把 Token 记到实例上；如果它是 session 级，第一次有人调用 anonymous.login(...) 之后，后面所有拿到 anonymous 的用例都悄悄变成「已登录」—— 而 test_delete_post_requires_login 会**真的把 post 1 删掉**。项目踩过一次。"}
+    - {name: seed_user_client, scope: session, source: conftest.py:93, returns: ApiClient,
+       desc: "已登录的 test001（id=2，主测试账号）", for_writes: false}
+    - {name: seed_user_2_client, scope: session, source: conftest.py:103, returns: ApiClient,
+       desc: "已登录的 test002（id=3，与被测对象不是自己的场景）"}
+    - {name: admin_client, scope: session, source: conftest.py:111, returns: ApiClient,
+       desc: "已登录的 admin（id=1，唯一管理员）"}
+    - {name: fresh_user, scope: function, source: conftest.py:121, returns: "callable(prefix='qa') -> ApiClient",
+       desc: "注册全新用户并返回已登录客户端；用户名 = prefix + uuid4().hex[:10]",
+       usage: "client = fresh_user()  |  alice = fresh_user('alice')",
+       why_random: "测试真实落库且**无法通过接口删除用户**，固定用户名第二次运行就撞唯一键"}
+    - {name: fresh_users, scope: function, source: conftest.py:141, returns: "callable(count=2, prefix='qa') -> list[ApiClient]",
+       desc: "一次创建多个互不相同的用户", usage: "alice, bob = fresh_users(2)"}
+    - {name: unique_suffix, scope: function, source: conftest.py:163, returns: str,
+       desc: "uuid4().hex[:10]，给需要唯一字符串的场景（如邮箱）"}
+  not_available:
+    - "❌ 没有 db / sql / mysql 夹具 —— 项目**不提供**数据库直连夹具"
+    - "❌ 没有 mock 夹具 —— 本项目不需要 Mock 任何外部服务（无第三方 API）"
+    - "❌ 没有 reset_db 夹具 —— 重置数据库是**人工/脚本**动作，不是夹具"
+  sql_assertion_note: >-
+    需要数据库层断言时，本套件**没有**现成夹具，
+    必须自己用 mysql CLI 或 pymysql 直连（库名 miqu，root/root，3306）。
+    直接 SQL 断言业务主表时必须带 `AND deleted = 0`（XC-003）。
+
+# ═══════════════════════════════════════════════════════════════
+# 4. ApiClient / ApiResponse API 参考（只能用这些方法）
+# ═══════════════════════════════════════════════════════════════
+api_client:
+  source: tests/utils/client.py
+  class: ApiClient
+  constructor: "ApiClient(base_url, token=None, timeout=15)"
+  request_methods:
+    - {sig: "get(path, *, params=None, json_body=None, headers=None)", returns: ApiResponse}
+    - {sig: "post(path, *, json_body=None, params=None, files=None, data=None, headers=None)", returns: ApiResponse}
+    - {sig: "put(path, ...)", returns: ApiResponse}
+    - {sig: "delete(path, ...)", returns: ApiResponse}
+    - {sig: "request(method, path, ...)", returns: ApiResponse}
+  convenience:
+    - {sig: "login(username, password='123456')", desc: "登录；**成功时把 token 记到本实例**；返回响应（便于断言失败场景）"}
+    - {sig: "register(username, password='123456', **overrides)", desc: "自动补 nickname 与 email：nickname=f'测试用户{username[-4:]}'、email=f'{username}@miqu.test'"}
+    - {sig: "with_token(token)", desc: "派生一个使用指定 Token 的客户端（共享 base_url）"}
+  auth_header: "Authorization: Bearer <token>（由 _headers() 自动加）"
+  response_class: ApiResponse
+  response_fields:
+    - {name: http_status, type: int, desc: "**HTTP 状态码**，只在断言 /uploads/** 时使用"}
+    - {name: code, type: int, desc: "**业务码 —— 断言的主角**"}
+    - {name: message, type: str, desc: "失败文案；成功恒为 success"}
+    - {name: data, type: "Any", desc: "业务数据；失败通常为 None"}
+    - {name: raw_text, type: str, desc: "原始响应前 500 字符，排查用"}
+    - {name: headers, type: "dict[str, str]"}
+  response_properties:
+    - {name: ok, expr: "code == 200", desc: "**首选的成功判断**"}
+    - {name: is_conflict, expr: "code == 409"}
+  no_json_behavior: "响应不是合法 JSON 时返回 code=-1、message='响应不是合法 JSON'（不抛异常）"
+
+# ═══════════════════════════════════════════════════════════════
+# 5. 可复制模板（照抄即可运行）
+# ═══════════════════════════════════════════════════════════════
+templates:
+
+  - id: T-01
+    name: 标准成功用例（读操作用种子账号）
+    code: |
+      def test_read_seed_user_profile(seed_user_client):
+          resp = seed_user_client.get("/api/users/2")
+          assert resp.ok, resp.message
+          assert resp.code == 200
+          assert resp.data["id"] == "2"              # id 是**字符串**
+          assert resp.data["followerCount"] == 14    # 计数是**数字**（种子绝对值，合法例外）
+
+  - id: T-02
+    name: 未登录 → 401
+    code: |
+      def test_follow_requires_login(anonymous):
+          resp = anonymous.post("/api/users/3/follow")
+          assert resp.code == 401
+          assert resp.message == "未登录或登录状态已失效"
+
+  - id: T-03
+    name: 用差值断言计数（**推荐主写法**）
+    code: |
+      def test_register_increases_user_total(anonymous, admin_client, unique_suffix):
+          before = admin_client.get("/api/admin/stats").data["userTotal"]
+          anonymous.register(f"qa{unique_suffix}")
+          after = admin_client.get("/api/admin/stats").data["userTotal"]
+          assert after == before + 1
+
+  - id: T-04
+    name: 建互关对并发消息（最高频 setup）
+    code: |
+      def _uid(client):
+          resp = client.get("/api/users/me")
+          assert resp.ok, resp.message
+          return resp.data["id"]
+
+      def _make_mutual(a, b):
+          """互相关注 —— 私信/会话用例的**必要前置**，少一半就 403。"""
+          for follower, target in ((a, b), (b, a)):
+              r = follower.post(f"/api/users/{_uid(target)}/follow")
+              assert r.ok or r.code == 409, r.message
+
+      def test_mutual_follow_allows_sending(fresh_users):
+          alice, bob = fresh_users(2)
+          _make_mutual(alice, bob)
+          resp = alice.post("/api/messages", json_body={"receiverId": _uid(bob), "content": "hi"})
+          assert resp.ok, resp.message
+
+  - id: T-05
+    name: 被拒请求不留痕（三条断言）
+    code: |
+      def test_blocked_send_leaves_no_trace(fresh_users):
+          alice, bob = fresh_users(2)          # 陌生人，**不**建立互关
+          conv_before = len(alice.get("/api/conversations").data["list"])
+          unread_before = bob.get("/api/messages/unread-count").data["total"]
+
+          resp = alice.post("/api/messages", json_body={"receiverId": _uid(bob), "content": "hi"})
+          assert resp.code == 403
+          assert resp.message == "需要互相关注后才能私聊"
+
+          assert len(alice.get("/api/conversations").data["list"]) == conv_before
+          assert bob.get("/api/messages/unread-count").data["total"] == unread_before
+
+  - id: T-06
+    name: 参数化边界用例
+    code: |
+      import pytest
+
+      @pytest.mark.parametrize(("payload", "expected_code"), [
+          ({"username": "ab",          "password": "123456"}, 400),  # 用户名 < 4
+          ({"username": "1abc",        "password": "123456"}, 400),  # 不以字母开头
+          ({"username": "a" * 21,      "password": "123456"}, 400),  # 用户名 > 20
+          ({"username": "validname1",  "password": "123"},    400),  # 密码 < 6
+      ])
+      def test_register_validation(anonymous, payload, expected_code, unique_suffix):
+          payload = {**payload, "nickname": "n", "email": f"qa{unique_suffix}@miqu.test"}
+          assert anonymous.post("/api/auth/register", json_body=payload).code == expected_code
+
+  - id: T-07
+    name: 并发竞态（唯一键兜底）
+    code: |
+      import threading
+      from concurrent.futures import ThreadPoolExecutor
+
+      def _clone(client):
+          """requests.Session 不保证线程安全 → 每线程独立 Session，共享同一 Token。"""
+          return ApiClient(client.base_url, token=client.token)
+
+      def _race(workers, call):
+          barrier = threading.Barrier(workers)
+          def run(i):
+              barrier.wait()          # 把线程压到同一时刻起跑，否则会退化成串行
+              return call(i)
+          with ThreadPoolExecutor(max_workers=workers) as pool:
+              return [f.result() for f in [pool.submit(run, i) for i in range(workers)]]
+
+      def test_concurrent_duplicate_like(fresh_users):
+          liker, author = fresh_users(2)
+          post = author.post("/api/posts", json_body={"content": "并发点赞目标"}).data
+          pid = post["id"]
+          before = author.get(f"/api/posts/{pid}").data["likeCount"]
+
+          workers = 8
+          results = _race(workers, lambda _: _clone(liker).post(f"/api/posts/{pid}/like"))
+          successes = sum(1 for r in results if r.ok)
+          assert successes == 1                                   # 恰好 1 个成功
+          assert author.get(f"/api/posts/{pid}").data["likeCount"] == before + 1
+
+  - id: T-08
+    name: 上传图片并验证可访问（跨文件系统闭环）
+    code: |
+      # 真实图片字节（**不能只改后缀名**：服务端按文件头魔数判类型）
+      PNG_1PX = bytes.fromhex(
+          "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
+          "890000000a49444154789c6300010000050001c6f5a9c70000000049454e44ae426082"
+      )
+
+      def test_uploaded_file_is_reachable(fresh_user):
+          me = fresh_user()
+          resp = me.post("/api/files/image", files={"file": ("a.png", PNG_1PX, "image/png")})
+          assert resp.ok, resp.message
+          url = resp.data["url"]
+          assert url.startswith("/uploads/image/")
+
+          # 用 ApiClient 的 http_status：/uploads/** 是全项目唯一"真 HTTP 状态码"的地方
+          raw = me.get(url)
+          assert raw.http_status == 200
+
+  - id: T-09
+    name: 直接 SQL 层断言（没有夹具，自己连库）
+    code: |
+      import subprocess
+
+      MYSQL = r"C:/Program Files/MySQL/MySQL Server 9.4/bin/mysql.exe"
+
+      def sql(query: str) -> str:
+          return subprocess.run(
+              [MYSQL, "-uroot", "-proot", "-N", "-e", query],
+              capture_output=True, text=True, check=True,
+          ).stdout.strip()
+
+      def test_unfollow_logically_deletes_notification(fresh_users):
+          follower, target = fresh_users(2)
+          tid = _uid(target)
+          follower.post(f"/api/users/{tid}/follow")
+          follower.delete(f"/api/users/{tid}/follow")
+
+          # ⚠️ notification 是**逻辑删除**：行仍在，deleted=1（不是 COUNT=0）
+          row = sql(f"SELECT deleted FROM miqu.notification "
+                    f"WHERE user_id={tid} AND actor_id={_uid(follower)} AND type=1;")
+          assert row.split("\t")[-1] == "1"
+
+          # 对照：follow 是**物理删除** → COUNT = 0
+          assert sql(f"SELECT COUNT(*) FROM miqu.follow "
+                     f"WHERE follower_id={_uid(follower)} AND following_id={tid};") == "0"
+
+# ═══════════════════════════════════════════════════════════════
+# 6. 反模式清单（AI 最常写错的地方）
+# ═══════════════════════════════════════════════════════════════
+anti_patterns:
+  - id: AP-01
+    wrong: "assert resp.status_code == 200"
+    why: "恒真，断言无意义（XC-001）"
+    right: "assert resp.ok"
+  - id: AP-02
+    wrong: "assert resp.code == 200 而不管 HTTP —— 在 /uploads/** 上"
+    why: "静态资源缺失时无 JSON 响应体，code 会是 -1（客户端做了兜底）"
+    right: "assert resp.http_status == 404"
+  - id: AP-03
+    wrong: "assert resp.data['total'] == 21"
+    why: "库随运行增长，第二次必挂（HR-02）"
+    right: "用差值"
+  - id: AP-04
+    wrong: "assert resp.data['id'] == 2"
+    why: "id 序列化为**字符串**（XC-002）"
+    right: "assert resp.data['id'] == '2'"
+  - id: AP-05
+    wrong: "assert resp.data['likeCount'] == '10'"
+    why: "计数是**数字**，不是字符串"
+    right: "assert resp.data['likeCount'] == 10"
+  - id: AP-06
+    wrong: "用 anonymous 夹具做写操作（以为它是独立实例）"
+    why: "一旦有人对 anonymous 调过 login()，它就是这个 Token 的身份了"
+    right: "写操作一律用 fresh_user()"
+  - id: AP-07
+    wrong: "alice.post('/api/messages') 前不做互关"
+    why: "必然 403 NOT_MUTUAL_FOLLOW"
+    right: "_make_mutual(alice, bob)"
+  - id: AP-08
+    wrong: "requests.get(f'{base_url}/api/posts')"
+    why: "绕过 ApiClient → 要自己拼 Authorization 头，且会踩 proxy 问题"
+    right: "client.get('/api/posts')"
+  - id: AP-09
+    wrong: "改种子账号密码 / 禁用 admin / 删 post 1"
+    why: "破坏 JUnit 与其它用例的绝对值断言（HR-03）"
+    right: "用 fresh_user"
+  - id: AP-10
+    wrong: "assert resp.message == '参数校验失败'"
+    why: "实际 message 几乎从不是这句；GlobalExceptionHandler 用**具体字段文案**替换它"
+    right: "断言具体文案，如 '消息内容不能为空'"
+  - id: AP-11
+    wrong: "为已证不可达的分支写用例（EMPTY_COMMENT / targetType=4 的 INVALID_TARGET_TYPE）"
+    why: "必然拿不到预期码（rules/validation_order.yaml §4 死分支清单）"
+    right: "先查死分支清单"
+  - id: AP-12
+    wrong: "sys.exit / pytest.skip 跳过失败用例"
+    why: "违反 HR-01"
+    right: "查被测代码"
+
+# ═══════════════════════════════════════════════════════════════
+# 7. 可执行性门槛（生成的用例必须同时满足）
+# ═══════════════════════════════════════════════════════════════
+executability_gates:
+  desc: "任一条不满足 → 该用例不可自动执行，应打回重生成，而不是交给执行器。"
+  gates:
+    - id: EG-01
+      check: "使用的 fixture 名必须在 §3 清单里逐字命中"
+    - id: EG-02
+      check: "调用的端点必须在 api/endpoints.yaml 里存在（方法 + 路径逐字一致）"
+    - id: EG-03
+      check: "请求体字段名必须与 api/endpoints.yaml 的 request_body.fields 一致"
+    - id: EG-04
+      check: "需要认证的端点必须有客户端 Token（用 seed_*_client / fresh_user，不要手动拼 header）"
+    - id: EG-05
+      check: "预期码必须在 api/error_codes.yaml 里存在，且该分支在 rules/validation_order.yaml 里**可达**"
+    - id: EG-06
+      check: "每条断言都能在 rules/side_effects.yaml 或 api/endpoints.yaml 里找到依据"
+    - id: EG-07
+      check: "写操作的前置数据可构造（data/seed_data.yaml 已有，或用 fresh_user 自建）"
+    - id: EG-08
+      check: "不依赖任何绝对值（除 data/seed_data.yaml 明确列出的种子基准）"
+    - id: EG-09
+      check: "使用了 marker 的话必须是 smoke / read / write 三者之一（--strict-markers）"
+    - id: EG-10
+      check: "用例可**重复运行**：第二次运行不得因唯一键冲突或数据累积而失败"
+
+# ═══════════════════════════════════════════════════════════════
+# 8. 追溯性要求
+# ═══════════════════════════════════════════════════════════════
+traceability:
+  required_annotations:
+    docstring_fields: [feature, api, rules, scenario]
+    example: |
+      def test_stranger_cannot_send(fresh_users):
+          """[MSG-011] 非互关用户发私信 → 403
+
+          feature: 私信
+          api: POST_MESSAGES
+          rules: MSG-011, CONV-014
+          scenario: 陌生人（无任何关注关系）尝试发私信
+          """
+  why: "生成失败时能回答「为什么生成这个测试」，也能反查「哪条规则没被覆盖」（coverage_matrix.yaml）"
+
+ai_checklist:
+  - "生成代码前：先从 fixture 清单里挑夹具，从 endpoints.yaml 里抄路径与字段名"
+  - "断言只用 resp.code / resp.message / resp.data；http_status 只在 /uploads/** 上用"
+  - "写操作的 setup 里**必须**包含互关（若涉及私信/会话）"
+  - "所有计数断言改成差值形式"
+  - "生成后逐条过 §7 的 10 条可执行性门槛"
+  - "红色不要改测试（HR-01）"

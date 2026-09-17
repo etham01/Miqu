@@ -64,6 +64,15 @@ def collect_pytest_ids() -> set[str]:
     return found
 
 
+class CaseFileError(Exception):
+    """用例 YAML 无法被解析（结构写坏了）。
+
+    单独定义一个异常，是为了让 main() 把它当作一条**问题**报出来（退出码 1），
+    而不是让 PyYAML 的栈直接冒到用户面前——后者看起来像脚本自己坏了，
+    会掩盖"其实是 YAML 写错了"这个事实。
+    """
+
+
 def load_entries(path: Path) -> list[dict]:
     """解析一个 YAML 文件，返回 [{id, pytest, status}, ...]。"""
     text = path.read_text(encoding="utf-8")
@@ -71,7 +80,12 @@ def load_entries(path: Path) -> list[dict]:
     try:
         import yaml  # type: ignore
 
-        data = yaml.safe_load(text)
+        try:
+            data = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            first = str(exc).splitlines()[0]
+            raise CaseFileError(f"{path.name}: YAML 结构非法 -> {first}") from exc
+
         entries: list[dict] = []
 
         def walk(node):
@@ -164,7 +178,13 @@ def main() -> int:
     gaps = 0
 
     for path in sorted(CASE_DIR.glob("*.yaml")):
-        entries = load_entries(path)
+        try:
+            entries = load_entries(path)
+        except CaseFileError as exc:
+            # 结构写坏的文件不跳过、不静默：记成问题并继续检查其余文件
+            problems.append(str(exc))
+            print(f"{path.name}: 解析失败（已记入问题清单）")
+            continue
         print(f"{path.name}: {len(entries)} 条")
         for entry in entries:
             total += 1

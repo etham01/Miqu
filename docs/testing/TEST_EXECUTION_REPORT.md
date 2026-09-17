@@ -36,14 +36,14 @@ GET /api/health  ->  {"code":200,"message":"success",
 
 ```
 Pytest:
-248 collected
-248 passed
+250 collected
+250 passed
 0 failed
 0 skipped
 用时：约 39 秒
 ```
 
-连续执行**两次**，两次均为 `248 passed`（套件幂等，中途无需重置数据库）。
+连续执行**两次**，两次均为 `250 passed`（套件幂等，中途无需重置数据库）。
 
 | 文件 | 用例数 | 覆盖 |
 |---|---|---|
@@ -56,14 +56,15 @@ Pytest:
 | `api/test_notification.py` | 16 | 三类通知产生与撤回、自操作不通知、已读状态 |
 | `api/test_search.py` | 15 | 昵称/用户名匹配、粉丝数倒序、LIKE 通配符转义 |
 | **`api/test_message_mutual_follow.py`** | **14** | **互关私聊规则（发送侧）** |
-| **`api/test_file.py`** | **14** | **文件上传安全：魔数、大小、MIME、空/极小文件、可访问性** |
+| **`api/test_file.py`** | **16** | **文件上传安全：魔数、大小、MIME、空/极小文件、可访问性**；**缺失静态资源真 404** |
 | `api/test_comment.py` | 13 | 发表、长度与空内容、删除权限 |
 | **`api/test_conversation_mutual_follow.py`** | **11** | **互关私聊规则（会话打开侧）+ 参与者隔离** |
 | **`api/test_concurrency.py`** | **6** | **并发注册/关注/取关/点赞/建会话/发消息** |
-| 合计 | **248** | |
+| 合计 | **250** | |
 
 > 两个阶段叠加：2026-09-14 收尾阶段新增 4 个文件 45 条（201 → 246）；
-> 同日 Bug Hunt 修复阶段新增 `test_user.py` 2 条 BUG-005 回归（246 → 248）。
+> 同日 Bug Hunt 修复阶段新增 `test_user.py` 2 条 BUG-005 回归（246 → 248）；
+> 2026-09-16 头像修复阶段新增 `test_file.py` 2 条 BUG-007 回归（248 → 250）。
 
 ### 2.2 JUnit —— 进程内 MockMvc
 
@@ -81,23 +82,23 @@ BUILD SUCCESS
 ### 2.3 两套测试合计
 
 ```
-248 (pytest) + 291 (JUnit) = 539 条自动化用例
+250 (pytest) + 291 (JUnit) = 541 条自动化用例
 ```
 
 ### 2.4 浏览器回归 —— 前端状态一致性（真实 Chrome）
 
 ```
-12 项断言 / 12 PASS / 0 FAIL
+15 项断言 / 15 PASS / 0 FAIL
 exit code 0
 ```
 
 `tests/browser_regression.mjs`，覆盖 **pytest 表达不出来**的那一层：
 BUG-002/003/004 三个前端缺陷的回归 + BUG-001 的固定守卫。
 
-修复前为 **5 PASS / 6 FAIL**（这就是进入修改阶段的准入闸门），修复后 12/12。
+修复前为 **5 PASS / 6 FAIL**（BUG-002/003/004 的准入闸门），修复后 15/15。
 
 > 它不参与 pytest 收集（`pytest.ini` 的 `testpaths = api`，只收 `test_*.py`），
-> 所以它红不会污染上面 248 条的绿灯。
+> 所以它红不会污染上面 250 条的绿灯。
 
 ---
 
@@ -258,7 +259,7 @@ cd backend && mvn test
 java -jar backend/target/miqu-backend-1.0.0.jar --server.port=8081
 curl http://localhost:8081/api/health
 
-# ---- 4. pytest（248）----
+# ---- 4. pytest（250）----
 pip install -r tests/requirements.txt
 cd tests && python -m pytest --collect-only -q
 python -m pytest -q
@@ -283,17 +284,19 @@ node tests/browser_regression.mjs              # 前端状态一致性回归（1
 ## 9. 结论
 
 ```
-Pytest:   248 collected / 248 passed / 0 failed
+Pytest:   250 collected / 250 passed / 0 failed
 JUnit:    291 run       /   0 failures / 0 errors / 0 skipped
-合计:     539 条自动化用例，0 失败
-浏览器:   12 项断言 / 12 PASS（前端状态一致性回归）
+合计:     541 条自动化用例，0 失败
+浏览器:   15 项断言 / 15 PASS（前端状态一致性 + 图片降级回归）
 端到端:   41/41 通过
 前端:     vue-tsc 类型检查通过、构建通过、页面渲染正常
 
 Status: PASS
 ```
 
-### 9.1 本轮（Bug Hunt 修复）修了 4 个真缺陷
+### 9.1 已修复的真缺陷
+
+**2026-09-14 Bug Hunt 修复（4 个）**
 
 | ID | 缺陷 | 级别 | 回归 |
 |---|---|---|---|
@@ -302,6 +305,15 @@ Status: PASS
 | BUG-004 | 通知切类型后标签与数据不一致 | P2 | `BUG-004.a~b` |
 | BUG-005 | 头像可写入任意外链（不校验 `/uploads/`） | P2 | pytest + JUnit 各 2 条 |
 
+**2026-09-16 头像问题修复（3 个，其中 1 个待决策）**
+
+| ID | 缺陷 | 级别 | 回归 |
+|---|---|---|---|
+| BUG-006 | 头像加载失败无兜底，取不到就是永久破图（全站 15 处共用组件） | **P1** | `BUG-006.a~c` |
+| BUG-007 | 静态资源 404 被包成 `HTTP 200 + JSON`，`<img>` 解码失败 | P2 | pytest 2 条 |
+| BUG-008 | 头像接口不校验目标文件是否存在 | P2 | ⏸ 待决策（与 2 条既有用例冲突） |
+
 BUG-001（取消关注后仍能看到对方动态）经五路交叉验证为 **NOT_A_BUG / 未复现**，
 已固化为长期回归守卫 `BUG-001.a~d`。完整证据链见
-[`bug_report.md`](bug_report.md)。
+[`bug_report.md`](bug_report.md)；头像问题的完整诊断见
+[`avatar-issue-diagnosis.md`](avatar-issue-diagnosis.md)。

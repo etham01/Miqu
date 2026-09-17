@@ -1,0 +1,430 @@
+# Miqu 业务流程知识库
+#
+# 用途：回答「**多接口串起来的业务流程长什么样**」—— 端到端用例与 setup/cleanup 的依据。
+#
+# 为什么必须单独成文：
+#   单接口事实（endpoints.yaml）拼不出"业务怎么走"。而本项目**最高频的用例失败原因**
+#   就是 setup 顺序错：发私信前忘记建立**双向**关注、删动态前忘记它是评论的父级、
+#   用种子账号做写操作污染了绝对值断言。这些错误只有流程级的描述才能预防。
+#
+# 消费者：
+#   LLM               → 生成端到端场景；按 preconditions 生成 setup；按 cleanup 生成收尾
+#   BusinessValidator → 校验步骤之间依赖是否可满足（如"发消息前是否有互关"）
+#   CoverageValidator → 统计流程覆盖
+#   执行器            → 生成可运行的多步用例
+#
+# 真相来源：service/impl/*.java 的调用链 + tests/api/*.py 的实际编排 + tests/browser_regression.mjs
+# confidence: CONFIRMED（每条流程都能在已有测试或源码中找到依据）
+# verified_at: 2026-09-17
+
+meta:
+  generated_at: 2026-09-17
+  workflow_count: 10
+  execution_targets:
+    pytest: "tests/api/*.py（打真实 HTTP，写入真实落库）"
+    junit: "backend/src/test（MockMvc，@Transactional 回滚）"
+    browser: "tests/browser_regression.mjs（真实 Chrome，覆盖前端状态一致性）"
+  setup_conventions:
+    new_users: "fresh_users(n) —— 需要写数据时必须用，用户名带随机后缀"
+    make_mutual: "_make_mutual(a, b) 是本项目**既有惯例函数**（tests/api/test_message*.py / test_concurrency.py 各自定义了一份）"
+    seed_only_read: "种子账号只用于只读断言"
+  cross_refs:
+    validation_order: rules/validation_order.yaml
+    side_effects: rules/side_effects.yaml
+    states: states/state_machines.yaml
+    permissions: permissions/permission_matrix.yaml
+    contracts: execution/pytest_contract.yaml
+
+# ═══════════════════════════════════════════════════════════════
+workflows:
+
+  # ─────────────────────────────────────────────────────────────
+  - id: WF-01
+    name: 注册 → 登录 → 读取自己资料
+    priority: P1
+    purpose: "最小可运行链路，验证认证三件套与响应信封"
+    actors: [游客]
+    preconditions:
+      - "无（用户名必须**全局唯一且随机**，否则第二次运行撞 uk_username）"
+      - "密码需满足 6~20 位；用户名需匹配 ^[A-Za-z][A-Za-z0-9_]*$ 且 4~20 位"
+    steps:
+      - {n: 1, api: POST_AUTH_REGISTER, action: "注册 {username, password, nickname, email}", expect: {code: 200}}
+      - {n: 2, api: POST_AUTH_LOGIN, action: "用同一凭证登录", expect: {code: 200}}
+      - {n: 3, api: GET_USERS_ME, action: "携带 token 读取自己", expect: {code: 200}}
+    state_changes:
+      - "INSERT user（role=1、status=1、三个计数=0、deleted=0）"
+      - "登录与读自己被写入任何行"
+    expected_states:
+      - "data.id 是**字符串**（XC-002）；role==1；status==1"
+      - "data.followingCount/followerCount/postCount == 0"
+      - "响应中**没有** password 字段"
+    cleanup: "❌ 用户删不掉 —— 靠随机用户名避免冲突"
+    related_apis: [POST_AUTH_REGISTER, POST_AUTH_LOGIN, GET_USERS_ME]
+    related_rules: [AUTH-001, AUTH-002, AUTH-003, USER-001]
+    existing_tests: {pytest: "api/test_auth.py"}
+    negative_variants:
+      - "重复注册同用户名 → 409 USERNAME_EXISTS"
+      - "重复注册同邮箱（换用户名）→ 409 EMAIL_EXISTS"
+      - "禁用账号登录 → 423 USER_DISABLED"
+      - "已注销账号登录 → 401 INVALID_CREDENTIALS"
+      - "密码错误 → 401 INVALID_CREDENTIALS（与「用户不存在」**同码同文案**，防枚举）"
+
+  # ─────────────────────────────────────────────────────────────
+  - id: WF-02
+    name: 图片上传 → 发布动态 → 可访问闭环
+    priority: P0
+    purpose: >-
+      唯一一条**跨文件系统与数据库**的流程。它是"动态图片 URL 必须是本站上传地址"
+      这条规则成立的前提，也是唯一能验证"上传的文件真的能被取回"的路径。
+    actors: [已登录用户]
+    preconditions:
+      - "fresh_user（POST /api/files/image 要求登录，白名单**不**放行 /api/files/**）"
+      - "准备真实图片字节（**不能只改后缀名** —— 服务端按文件头魔数判定类型）"
+    steps:
+      - {n: 1, api: POST_FILES_IMAGE, action: "multipart 上传 1 张 png（字段名必须是 file）", expect: {code: 200},
+         capture: "url = data.url"}
+      - {n: 2, api: GET, raw_path: "«第 1 步的 url»", action: "直接 GET 该 URL 验证可取回",
+         expect: {http_status: 200, content_type: "image/*"},
+         note: "⚠️ URL 前缀是 /uploads/**，**不是 /api/** → 认证拦截器不生效，无需 Token**；失败时是**真 HTTP 404**（全项目唯一例外）"}
+      - {n: 3, api: POST_POSTS, action: "发动态引用该 url", expect: {code: 200}}
+      - {n: 4, api: GET_POSTS_ID, action: "读详情，确认 images 与顺序", expect: {code: 200}}
+    state_changes:
+      - "磁盘：uploads/image/yyyy/MM/<32hex>.png（**永久保留，无清理接口**）"
+      - "INSERT post + INSERT post_image(sort_order=0)"
+      - "UPDATE user.post_count + 1"
+    expected_states:
+      - "data.url 匹配 ^/uploads/image/\\d{4}/\\d{2}/[0-9a-f]{32}\\.(jpg|png|gif|webp)$"
+      - "动态详情里的图片顺序与传入数组一致"
+    cleanup: "动态可删（DELETE /api/posts/{id}），**磁盘文件删不掉** —— 接受累积，这是预期行为"
+    related_apis: [POST_FILES_IMAGE, POST_POSTS, GET_POSTS_ID]
+    related_rules: [FILE-001, FILE-007, FILE-009, FILE-013, FILE-014, POST-004]
+    existing_tests: {pytest: "api/test_file.py（16 条）"}
+    negative_variants:
+      - "脚本改名为 .jpg 上传 → 400 FILE_TYPE_NOT_ALLOWED（魔数不符）"
+      - "文件 < 12 字节 → 400 FILE_TYPE_NOT_ALLOWED（FILE-013）"
+      - "> 5MB → 400 FILE_TOO_LARGE"
+      - "缺 file 字段 → 400 PARAM_INVALID；非 multipart → 400 PARAM_INVALID"
+      - "未登录上传 → 401"
+      - "发动态时用外链 URL（https://…）→ 400 INVALID_IMAGE_URL（**跨接口规则**：URL 必须来自本流程第 1 步）"
+
+  # ─────────────────────────────────────────────────────────────
+  - id: WF-03
+    name: 动态全生命周期（发布 → 可见 → 删除 → 不可见）
+    priority: P1
+    purpose: "验证逻辑删除的可见性影响与级联清理"
+    actors: [作者, 他人, 管理员]
+    preconditions: ["fresh_user 作为作者（**不要删种子 post 1/2/3**，大量绝对值断言依赖）"]
+    steps:
+      - {n: 1, api: POST_POSTS, action: "作者发布", expect: {code: 200}, capture: "post_id"}
+      - {n: 2, api: GET_POSTS, action: "游客读列表，应能看到", expect: {code: 200}}
+      - {n: 3, api: GET_POSTS_ID, action: "读详情", expect: {code: 200}}
+      - {n: 4, api: DELETE_POSTS_ID, action: "他人删除 → 应被拒", expect: {code: 403, error_code: FORBIDDEN}}
+      - {n: 5, api: DELETE_POSTS_ID, action: "作者删除", expect: {code: 200}}
+      - {n: 6, api: GET_POSTS_ID, action: "再读详情", expect: {code: 404, error_code: POST_NOT_FOUND}}
+    state_changes_on_delete:
+      - "post.deleted=1（逻辑）"
+      - "该 post 下 comment 全部 deleted=1（逻辑）"
+      - "post_image / post_like 行**物理删除**"
+      - "user.post_count - 1（GREATEST 保底不为负）"
+      - "type=2/3 且 post_id 匹配的 notification **逻辑删除**"
+    expected_states: ["删除后 列表/详情/点赞列表/评论列表 全部 404 或不再包含它"]
+    cleanup: "无需（本身就是清理）"
+    related_apis: [POST_POSTS, GET_POSTS, GET_POSTS_ID, DELETE_POSTS_ID, POST_POSTS_ID_COMMENTS]
+    related_rules: [POST-001, POST-005, POST-006]
+    existing_tests: {pytest: "api/test_post.py（31 条）"}
+
+  # ─────────────────────────────────────────────────────────────
+  - id: WF-04
+    name: 社交互动与通知联动（关注 / 点赞 / 评论 / 取消）
+    priority: P0
+    purpose: >-
+      本项目**副作用最密集**的流程：一次操作同时改关系表、冗余计数、通知表三处。
+      计数字段与实际行数不一致的历史缺陷就出在这里。
+    actors: [A（互动方）, B（内容作者）]
+    preconditions: ["fresh_users(2) → A、B（**不要用种子账号**：会把通知写进种子用户的未读）"]
+    steps:
+      - {n: 1, api: POST_USERS_ID_FOLLOW, actor: A, action: "A 关注 B", expect: {code: 200}}
+      - {n: 2, api: GET_USERS_ME_FOLLOWING, actor: A, action: "A 的关注列表应含 B", expect: {code: 200}}
+      - {n: 3, api: POST_POSTS, actor: B, action: "B 发动态", expect: {code: 200}, capture: "post_id"}
+      - {n: 4, api: GET_POSTS, actor: A, params: "tab=following", action: "A 的关注流应含该动态", expect: {code: 200}}
+      - {n: 5, api: POST_POSTS_ID_LIKE, actor: A, action: "A 点赞", expect: {code: 200}}
+      - {n: 6, api: GET_NOTIFICATIONS, actor: B, action: "B 应收到 type=2 通知", expect: {code: 200}}
+      - {n: 7, api: POST_POSTS_ID_COMMENTS, actor: A, action: "A 评论", expect: {code: 200}}
+      - {n: 8, api: GET_NOTIFICATIONS_UNREAD_COUNT, actor: B, action: "B 的未读数应 +2（关注 1 + 点赞 1 + 评论 1 = 3）", expect: {code: 200}}
+      - {n: 9, api: DELETE_POSTS_ID_LIKE, actor: A, action: "A 取消点赞", expect: {code: 200}}
+      - {n: 10, api: GET_NOTIFICATIONS, actor: B, action: "B 的点赞通知应消失", expect: {code: 200}}
+      - {n: 11, api: DELETE_USERS_ID_FOLLOW, actor: A, action: "A 取消关注", expect: {code: 200}}
+    state_changes:
+      - "follow 行 插入/物理删除；user.following_count / follower_count ±1"
+      - "post_like 行 插入/物理删除；post.like_count ±1"
+      - "comment 行 插入；post.comment_count +1"
+      - "notification 行 插入；取消时**逻辑删除**（deleted=1）"
+    expected_states:
+      - "B 的未读数在步骤 8 恰为 3（若 A 与 B 是互关，步骤 1 也产生一条 type=1）"
+      - "**计数两条独立断言**：API 返回的计数值 与 关系表实际行数（XC-005）"
+      - "自操作不产生通知：B 给自己点赞 → B 的未读不变（NOTI-004）"
+    cleanup: "关注/点赞可取消；评论可删；通知与用户删不掉 → 用差值断言"
+    related_apis: [POST_USERS_ID_FOLLOW, DELETE_USERS_ID_FOLLOW, POST_POSTS_ID_LIKE, DELETE_POSTS_ID_LIKE,
+                   POST_POSTS_ID_COMMENTS, GET_NOTIFICATIONS, GET_NOTIFICATIONS_UNREAD_COUNT]
+    related_rules: [FOL-001, FOL-002, LIKE-001, LIKE-002, CMT-001, NOTI-001, NOTI-004, NOTI-006, XC-005]
+    existing_tests: {pytest: "api/test_follow.py / test_post.py / test_comment.py / test_notification.py"}
+
+  # ─────────────────────────────────────────────────────────────
+  - id: WF-05
+    name: 互关私聊全流程（含解除互关后的降级）
+    priority: P0
+    purpose: >-
+      **本项目最重要的流程**（2026-09-11 冻结规则）。
+      验证"限制发起、不限制查看"这条设计意图，以及被拒请求不留痕。
+    actors: [A, B]
+    preconditions:
+      - "fresh_users(2) —— 用种子 2↔3 会污染 conversation 1 的 last_message 与未读数"
+      - "⚠️ 必须建立**双向**关注（只关注单向是 403）"
+    steps:
+      - {n: 1, action: "A→B 关注、B→A 关注（_make_mutual）", expect: {code: 200},
+         note: "这是本项目最高频的 setup 陷阱"}
+      - {n: 2, api: POST_CONVERSATIONS, actor: A, action: "A 打开会话", expect: {code: 200}, capture: "conversation_id"}
+      - {n: 3, api: GET_CONVERSATIONS, actor: A, action: "会话列表 —— **此时不应出现**（还没发消息）", expect: {code: 200}}
+      - {n: 4, api: POST_MESSAGES, actor: A, action: "A 发第一条消息", expect: {code: 200}}
+      - {n: 5, api: GET_CONVERSATIONS, actor: B, action: "B 的会话列表应出现它", expect: {code: 200}}
+      - {n: 6, api: GET_MESSAGES_UNREAD_COUNT, actor: B, action: "B 的未读 +1；A 的未读不变", expect: {code: 200}}
+      - {n: 7, api: PUT_CONVERSATIONS_ID_READ, actor: B, action: "B 标记已读", expect: {code: 200}}
+      - {n: 8, api: GET_MESSAGES_UNREAD_COUNT, actor: B, action: "B 的未读归零", expect: {code: 200}}
+      - {n: 9, api: DELETE_USERS_ID_FOLLOW, actor: "A（解除 A→B）", action: "解除互关", expect: {code: 200}}
+      - {n: 10, api: POST_MESSAGES, actor: A, action: "再发消息 → **403**", expect: {code: 403, error_code: NOT_MUTUAL_FOLLOW}}
+      - {n: 11, api: GET_CONVERSATIONS_ID_MESSAGES, actor: A, action: "历史消息**仍可读**", expect: {code: 200}}
+      - {n: 12, api: PUT_CONVERSATIONS_ID_READ, actor: A, action: "**仍可**标记已读", expect: {code: 200}}
+      - {n: 13, api: POST_USERS_ID_FOLLOW, actor: A, action: "A 重新关注恢复互关", expect: {code: 200}}
+      - {n: 14, api: POST_MESSAGES, actor: A, action: "发送能力恢复", expect: {code: 200}}
+    state_changes:
+      - "INSERT conversation（user1_id=min、user2_id=max，**CHECK user1_id < user2_id**）"
+      - "INSERT message（is_read=0）"
+      - "UPDATE conversation：last_message_id/preview/time + **仅接收方** unread +1"
+    expected_states:
+      - "步骤 3 空会话**不在列表**；步骤 5 发送后**在列表**"
+      - "步骤 6 只有接收方未读 +1"
+      - "🔴 步骤 10 的被拒**不留痕**：会话数不变、消息数不变、未读不变（test_blocked_send_leaves_no_trace）"
+      - "步骤 11/12 证明「限制发起不限制查看」"
+    cleanup: "会话与消息都删不掉 → 只能用 fresh_users 保证每轮新会话"
+    related_apis: [POST_USERS_ID_FOLLOW, DELETE_USERS_ID_FOLLOW, POST_CONVERSATIONS, GET_CONVERSATIONS,
+                   POST_MESSAGES, GET_CONVERSATIONS_ID_MESSAGES, PUT_CONVERSATIONS_ID_READ, GET_MESSAGES_UNREAD_COUNT]
+    related_rules: [MSG-011, MSG-013, MSG-014, CONV-009, CONV-011, CONV-014, CONV-015]
+    existing_tests:
+      pytest: "api/test_message_mutual_follow.py（14）+ test_conversation_mutual_follow.py（11）+ test_message.py（17）"
+    negative_variants:
+      - "陌生人（无关注）发消息 → 403 NOT_MUTUAL_FOLLOW"
+      - "单向关注（任一方向）→ 403"
+      - "接收者不存在 → 404 USER_NOT_FOUND（**先于**互关校验）"
+      - "接收者被禁用 → 423（**先于**互关校验）"
+      - "给自己发 → 400 CANNOT_MESSAGE_SELF（**先于**互关校验）"
+      - "非参与者读会话 / 标记已读 → 403 NOT_CONVERSATION_MEMBER"
+      - "空 content → 400 PARAM_INVALID（DTO 先于互关校验）"
+      - "种子 conversation 4（user 4↔6，非互关）→ 可读不可发（现成负向样本）"
+
+  # ─────────────────────────────────────────────────────────────
+  - id: WF-06
+    name: 取消关注后关注流不残留（BUG-001 固定回归）
+    priority: P1
+    purpose: >-
+      **前端状态一致性**用例。它证明"后端每次返回都是对的，缺陷在前端状态层"，
+      因此只能由浏览器回归覆盖，pytest 打 HTTP 看不见。
+    actors: [A, B]
+    execution_target: browser
+    preconditions: ["先后端 8081、前端 5173 都要起着", "fresh_users(2)", "需要真实 Chrome（channel: chrome）"]
+    steps:
+      - {n: 1, api: POST_USERS_ID_FOLLOW, actor: A, action: "A 关注 B"}
+      - {n: 2, api: POST_POSTS, actor: B, action: "B 发一条可识别的动态"}
+      - {n: 3, browser: "A 登录前端首页 → 切到「我的关注」tab", assert: "BUG-001.a 能看到 B 的动态"}
+      - {n: 4, api: DELETE_USERS_ID_FOLLOW, actor: A, action: "A 取消关注 B"}
+      - {n: 5, browser: "A 刷新 → 页面读主页确认 followedByMe=false", assert: "BUG-001.b 取消关注已落库"}
+      - {n: 6, browser: "A 切到「我的关注」", assert: "BUG-001.c **不再出现** B 的动态"}
+      - {n: 7, browser: "监听网络请求", assert: "BUG-001.d 确实重新请求了 tab=following（而不是拿缓存充数）"}
+    state_changes: ["follow 行物理删除；follow 相关计数 -1"]
+    expected_states: ["关注流里没有 B 的动态，且**确实发起了新请求**"]
+    related_rules: [XC-007]
+    existing_tests: {browser: "tests/browser_regression.mjs → BUG-001.a/b/c/d（4 项断言）"}
+    note: >-
+      ⚠️ BUG-001 **已被证伪**（取消关注后关注流行为本来就是对的）。
+      这组断言作为**固定回归守卫**保留，防止将来改坏。
+
+  # ─────────────────────────────────────────────────────────────
+  - id: WF-07
+    name: 举报 → 管理员处置 → 内容下线 → 操作日志
+    priority: P0
+    purpose: "唯一一条跨越普通用户与管理员两个角色、且带级联副作用的流程"
+    actors: [举报人, 被举报内容作者, 管理员]
+    preconditions:
+      - "seed 举报已处于终态 → 无法用于正向流程；**必须自建**：fresh_users(2) → 一方发动态"
+      - "管理员只能用种子 admin（唯一一个）"
+    steps:
+      - {n: 1, api: POST_POSTS, actor: A, action: "A 发动态（作为被举报内容）", expect: {code: 200}, capture: "post_id"}
+      - {n: 2, api: POST_REPORTS, actor: B, action: "B 举报该动态 {targetType: 2, targetId: post_id, reasonType: 1}",
+         expect: {code: 200}, capture: "report_id"}
+      - {n: 3, api: GET_ADMIN_REPORTS, actor: 管理员, action: "后台列表能看到该举报 + 目标摘要", expect: {code: 200}}
+      - {n: 4, api: PUT_ADMIN_REPORTS_ID_HANDLE, actor: 管理员,
+         action: "处置 {status: 1, action: DELETE_POST}", expect: {code: 200}}
+      - {n: 5, api: GET_POSTS_ID, action: "被举报动态已下线", expect: {code: 404, error_code: POST_NOT_FOUND}}
+      - {n: 6, api: GET_ADMIN_REPORTS, actor: 管理员, action: "该举报 status=1、handlerId 已填", expect: {code: 200}}
+      - {n: 7, api: GET_ADMIN_LOGS, actor: 管理员, action: "存在 operationType=HANDLE_REPORT 的日志",
+         expect: {code: 200}, note: "target_type=4、target_id 是**举报 ID**（不是被举报目标 ID）"}
+    state_changes:
+      - "INSERT report(status=0)"
+      - "handle 时：applyAction 先执行（级联删动态）→ 再 UPDATE report(status/handler_id/handle_time)"
+      - "INSERT admin_operation_log"
+    expected_states:
+      - "report.status=1、handlerId=管理员 ID、handleTime 非空"
+      - "post.deleted=1（级联的二次副作用）"
+      - "日志多一行且 target_type=4"
+    cleanup: "举报无删除接口；但唯一键含 reporter_id → **换 fresh_user 即等于新建**"
+    related_apis: [POST_REPORTS, GET_ADMIN_REPORTS, PUT_ADMIN_REPORTS_ID_HANDLE, GET_ADMIN_LOGS, GET_POSTS_ID]
+    related_rules: [RPT-001, RPT-002, RPT-003, RPT-004, RPT-005, RPT-006, RPT-007, RPT-009]
+    existing_tests: {pytest: "api/test_admin.py（53 条，含举报处置）", junit: "ReportControllerTest（13）"}
+    negative_variants:
+      - "重复举报同一目标（同人）→ 409 ALREADY_REPORTED；**换人举报同一目标 → 200**"
+      - "举报自己 → 400 CANNOT_REPORT_SELF"
+      - "targetType=4 → 400 PARAM_INVALID（不是 INVALID_TARGET_TYPE，见 C-03）"
+      - "目标不存在 → 404（POST_NOT_FOUND / COMMENT_NOT_FOUND / USER_NOT_FOUND）"
+      - "重复处理 → 409 REPORT_ALREADY_HANDLED"
+      - "status=2 却带 action → 400 REJECT_WITH_ACTION_NOT_ALLOWED"
+      - "action 与 targetType 不匹配 → 400 REPORT_ACTION_MISMATCH"
+      - "**先删动态再处置举报 → 200**（目标不存在时异常被吞掉，举报仍能结案）"
+
+  # ─────────────────────────────────────────────────────────────
+  - id: WF-08
+    name: 管理员禁用用户 → Token 立即失效 → 解禁恢复
+    priority: P0
+    purpose: >-
+      验证"每请求查库校验状态"这条实现决策的实际效果（SEC-002），
+      这是本项目少数几个**真有安全意义**的流程。
+    actors: [管理员, 目标用户]
+    preconditions:
+      - "目标必须是 fresh_user（**绝不能禁用 admin** —— 会锁死管理端测试）"
+      - "⚠️ 测试结束**必须解禁**，否则该账号污染同批其他用例"
+    steps:
+      - {n: 1, action: "注册 fresh_user 并**先登录拿到 Token**", expect: {code: 200}}
+      - {n: 2, api: GET_USERS_ME, actor: 目标, action: "禁用前正常访问", expect: {code: 200}}
+      - {n: 3, api: PUT_ADMIN_USERS_ID_STATUS, actor: 管理员, action: "{status: 0}", expect: {code: 200}}
+      - {n: 4, api: GET_USERS_ME, actor: "目标（**用步骤 1 的旧 Token**）", action: "应 423",
+         expect: {code: 423, error_code: USER_DISABLED}}
+      - {n: 5, api: POST_AUTH_LOGIN, actor: 目标, action: "重新登录 → 423", expect: {code: 423, error_code: USER_DISABLED}}
+      - {n: 6, api: GET_USERS_ID, action: "其主页**仍可访问**", expect: {code: 200},
+         note: "requireVisibleUser 不检查 status（USER-011）"}
+      - {n: 7, api: POST_USERS_ID_FOLLOW, action: "关注被禁用用户 → 423", expect: {code: 423}}
+      - {n: 8, api: PUT_ADMIN_USERS_ID_STATUS, actor: 管理员, action: "{status: 1}（**必须在 finally 里做**）", expect: {code: 200}}
+      - {n: 9, api: GET_USERS_ME, actor: "目标（旧 Token）", action: "恢复可用", expect: {code: 200}}
+    state_changes: ["UPDATE user.status；每次操作各 INSERT 一行 admin_operation_log（DISABLE_USER / ENABLE_USER）"]
+    expected_states:
+      - "禁用后旧 Token **立即** 423（不需要等 7 天过期）"
+      - "解禁后旧 Token **恢复可用**（同样是每请求查库的后果）"
+      - "白名单端点（如 GET /api/posts）在禁用状态下仍返回 200（按游客放行）"
+    cleanup: "✅ 解禁即恢复；日志与用户删不掉"
+    related_apis: [PUT_ADMIN_USERS_ID_STATUS, POST_AUTH_LOGIN, GET_USERS_ME, GET_USERS_ID, POST_USERS_ID_FOLLOW]
+    related_rules: [SEC-002, AUTH-004, USER-010, USER-011, USER-012, USER-014]
+    existing_tests: {pytest: "api/test_auth.py:140-161（含 finally 恢复的惯例）"}
+    dead_branch_warning: >-
+      🔴 不要生成"管理员禁用另一个管理员 → 403 CANNOT_DISABLE_ADMIN"的用例：
+      种子只有 1 个管理员，禁用自己时 CANNOT_OPERATE_SELF(400) 先命中（SEC-004 缺口）。
+
+  # ─────────────────────────────────────────────────────────────
+  - id: WF-09
+    name: 搜索 → 用户主页 → 关注状态展示
+    priority: P2
+    purpose: "验证 LIKE 通配符转义与 followedByMe/followingMe 的双向标记"
+    actors: [游客, 已登录用户]
+    preconditions: ["种子数据充足（21 个用户）；只读流程"]
+    steps:
+      - {n: 1, api: GET_USERS_SEARCH, actor: 游客, params: "keyword=张", action: "按昵称搜索", expect: {code: 200}}
+      - {n: 2, api: GET_USERS_SEARCH, actor: 游客, params: "keyword=%", action: "通配符被转义，**不应命中全表**", expect: {code: 200}}
+      - {n: 3, api: GET_USERS_ID, actor: 已登录, action: "读某用户主页", expect: {code: 200}}
+      - {n: 4, action: "断言 followedByMe / followingMe / mutual 三个字段的组合与实际 follow 行一致", expect: {code: 200}}
+    state_changes: ["无（全只读）"]
+    expected_states:
+      - "keyword='%' 不匹配全表（SqlLikeUtils 转义 % 与 _）"
+      - "keyword='' → 400 PARAM_INVALID（搜索关键词不能为空）"
+      - "搜索**不过滤 status** → 被禁用用户**仍能被搜到**；已注销用户搜不到（@TableLogic）"
+      - "游客搜索时 followedByMe 恒为 false"
+    cleanup: "无需"
+    related_apis: [GET_USERS_SEARCH, GET_USERS_ID, GET_USERS_ID_FOLLOWING, GET_USERS_ID_FOLLOWERS]
+    related_rules: [USER-006, USER-007, SEC-006]
+    existing_tests: {pytest: "api/test_search.py（15）", junit: "UserSearchTest（16）"}
+
+  # ─────────────────────────────────────────────────────────────
+  - id: WF-10
+    name: 前端筛选条件变更时的状态一致性（BUG-002/003/004 缺陷族）
+    priority: P1
+    purpose: >-
+      覆盖一类**后端全对、pytest 打不到**的缺陷：请求被"loading 去重守卫"丢弃，
+      导致**筛选标签与实际数据不一致**。
+      这是本项目唯一需要真实浏览器才能验证的缺陷族。
+    actors: [已登录用户]
+    execution_target: browser
+    preconditions:
+      - "后端 8081 + 前端 5173 都起着"
+      - "需要用**人工延迟**放大竞态窗口（否则窗口太窄，测不出来）"
+    steps:
+      - {n: 1, browser: "首页首屏请求仍在飞时，立刻切到「我的关注」",
+         assert: "BUG-002.a/b/c —— 高亮与数据同源、且确实补发了 tab=following 请求"}
+      - {n: 2, browser: "搜索页首次请求在飞时换关键词再搜",
+         assert: "BUG-003.a/b —— 重新发起请求且结果与当前关键词一致"}
+      - {n: 3, browser: "搜索页清空关键词（旧请求仍在飞）",
+         assert: "BUG-003.c —— 旧响应**不得**把已清空的列表重新填上"}
+      - {n: 4, browser: "通知页列表在飞时切到「点赞」类型",
+         assert: "BUG-004.a/b —— 补发 type=2 请求，且列表只含点赞通知"}
+    state_changes: ["无（纯前端状态层）"]
+    expected_states: ["筛选 UI 的选中态 与 列表数据 **必须同源**"]
+    root_cause: "if (loading.value) return 这类守卫会丢弃**用户的新查询**，而不仅是**过期响应**"
+    correct_pattern: "请求序号：只丢弃过期响应，不丢弃新查询"
+    related_rules: [XC-007]
+    existing_tests: {browser: "tests/browser_regression.mjs → BUG-002.a/b/c、BUG-003.a/b/c、BUG-004.a/b"}
+    registered_in: "test_cases/security_and_concurrency.yaml → ui_race_rules（CONC-008 ~ CONC-011，用 browser 字段而非 pytest 字段）"
+    note: >-
+      ⚠️ 该项目还存在一个**不可达的同类隐患**：`CommentList` 用了同样的守卫写法，
+      但因为**没有切换筛选条件的入口**，当前不可达。将来给它加筛选一定会踩。
+
+# ═══════════════════════════════════════════════════════════════
+# 通用 setup 片段（可被上面任意流程复用）
+# ═══════════════════════════════════════════════════════════════
+setup_snippets:
+  - id: S-01
+    name: 建一对可私聊的用户
+    used_by: [WF-05, WF-07]
+    steps:
+      - "clients = fresh_users(2) → A、B"
+      - "A.post(f'/api/users/{B_id}/follow')"
+      - "B.post(f'/api/users/{A_id}/follow')"
+    assertion: "两次都 200；此时 A、B 互相 followedByMe 为 true"
+    pitfall: "🔴 **只做单向 = 后面所有私信用例都 403**。这是本项目最高频的 setup 错误。"
+
+  - id: S-02
+    name: 建一个"已被处理"的举报
+    used_by: [举报的负向用例]
+    steps:
+      - "seed 已有 status=1/2 的举报 → **优先直接用**（data/seed_data.yaml）"
+      - "否则：A 发帖 → B 举报 → admin handle(status=1)"
+    assertion: "再 handle 同一条 → 409 REPORT_ALREADY_HANDLED"
+
+  - id: S-03
+    name: 建一个"取不到的头像"（用于 BUG-006 降级验证）
+    used_by: [WF-06 同类的前端降级用例]
+    steps:
+      - "PUT /api/users/me/avatar body {'avatar': '/uploads/image/2026/09/' + uuid + '.jpg'}"
+      - "该路径**前缀合法但磁盘上没有文件** → 接口返回 200（BUG-008：不校验文件存在性）"
+    assertion: "页面上该头像降级为首字母占位，不出现解码失败的 <img>"
+    note: "✅ 这个「不校验文件是否存在」的行为**当前是有意保留的测试手段**，不要试图修掉它"
+
+  - id: S-04
+    name: 把资源置到"已删除"状态
+    used_by: [验证已删除目标的 404 行为]
+    steps: ["⚠️ user 只能用 SQL：UPDATE user SET deleted=1 WHERE id=?（无删除接口）", "post/comment 用 DELETE 接口"]
+    note: "直接改库构造 user.deleted 是**有意为之**（auth_layer_probe 与 JUnit 都这么做），不是作弊"
+
+# ═══════════════════════════════════════════════════════════════
+# AI 使用检查点
+# ═══════════════════════════════════════════════════════════════
+ai_checklist:
+  - "选流程时先看 preconditions：需要写数据的流程**一律用 fresh_users**，不要用种子账号"
+  - "出现私信/会话时，**先确认互关已建立**（S-01），否则必然 403"
+  - "流程里每一步的 expect 必须来自 api/endpoints.yaml，不要凭直觉写"
+  - "涉及计数字段时补「API 计数 + 关系表行数」两条断言（XC-005）"
+  - "写 cleanup 前查 rules/side_effects.yaml §3：不可删除的资源要用随机数据，不要试图删除"
+  - "标记 execution_target 为 browser 的流程**不要**改写成 pytest —— 后端全对，pytest 打不到"

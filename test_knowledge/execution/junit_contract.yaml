@@ -1,0 +1,350 @@
+# JUnit / MockMvc 执行契约
+#
+# 用途：让 AI 生成的后端进程内用例**可直接编译运行**。
+#
+# 与 pytest 契约的关键差异（决定你该选哪一套）：
+#   JUnit：进程内、**事务自动回滚**、不发真实 HTTP → 适合"规则密集的分支覆盖"。
+#   pytest：真实 HTTP + 真实落库 → 适合"端到端契约与序列化"。
+#   两者**都依赖真实的 MySQL 与种子数据**（项目不用 H2、不用 Testcontainers）。
+#
+# 消费者：LLM（生成代码）｜Pydantic（校验类名与方法名）｜执行器（直接运行）
+#
+# 真相来源（逐行读取）：
+#   backend/src/test/java/com/miqu/support/BaseControllerTest.java
+#   backend/src/test/java/com/miqu/**/*Test.java（21 个测试类）
+#   backend/pom.xml（依赖与插件）
+#   docs/api/README.md §11.4（分工表）
+#
+# confidence: CONFIRMED
+# verified_at: 2026-09-17
+
+meta:
+  generated_at: 2026-09-17
+  location: backend/src/test/java/com/miqu/
+  suite_size: 291
+  class_count: 21
+  framework: "JUnit 5（版本由 spring-boot-starter-test 管理）+ MockMvc + AssertJ"
+  no_h2: "❌ 未使用 H2 内存库 —— **也连真实 MySQL**"
+  no_testcontainers: "❌ 未使用 Testcontainers"
+  no_ci: "❌ 无 CI 配置（扫描确认不存在 .github/workflows / Jenkinsfile / Dockerfile）"
+
+# ═══════════════════════════════════════════════════════════════
+# 1. 运行环境与前置（这一步不做，用例会大面积红）
+# ═══════════════════════════════════════════════════════════════
+environment:
+  critical_prerequisite:
+    rule: "🔴 跑 mvn test 前**必须先重置数据库**"
+    why: >-
+      JUnit 大量使用**种子数据的绝对值断言**（如 post 1 有 9 张图、test001 粉丝 14）。
+      手工 curl 或前端操作过之后这些值会漂移，用例就会红 —— 这不是代码问题。
+    command: |
+      mysql -u root -p < database/schema.sql
+      mysql -u root -p < database/data.sql
+    correct_order: "重置库 → mvn test → 再重置库 → 启后端 → pytest → 浏览器回归"
+
+  mvn_wrapper:
+    problem: "mvn 命令本身不可用，报 ClassNotFoundException: org.codehaus.plexus.classworlds.launcher.Launcher"
+    workaround: "用包装脚本：bash .workbuddy/tools/mvn.sh test"
+    requires: "JAVA_HOME=D:/soft/java/Java/jdk-21（系统 PATH 里的 java 是 25，JUnit 跑不起来）"
+
+  jar_lock_pitfall:
+    symptom: "mvn package 报 Unable to rename '...miqu-backend-1.0.0.jar' to '...jar.original'"
+    cause: "运行中的后端进程锁着那个 jar。**编译是成功的，只有 repackage 失败。**"
+    fix: "先停掉 8081 的 java 进程再打包"
+    implication: "mvn test 期间后端必须停着 —— 否则它自己也依赖编译产物，且会锁 jar"
+
+  server_port_pitfall:
+    symptom: "用 java -jar 启动后端时抢不到端口 / 起不来"
+    cause: "沙箱会注入 SERVER__PORT=16605，Spring Boot 宽松绑定把它当 server.port"
+    fix: "env -u SERVER__PORT -u SERVER_PORT $JAVA_HOME/bin/java -jar ... --server.port=8081"
+
+  run_commands:
+    all: "bash .workbuddy/tools/mvn.sh test"
+    single_class: "bash .workbuddy/tools/mvn.sh test -Dtest=UserControllerTest"
+    report: "backend/target/surefire-reports/"
+
+# ═══════════════════════════════════════════════════════════════
+# 2. 事务语义（JUnit 与 pytest 最本质的区别）
+# ═══════════════════════════════════════════════════════════════
+transaction_semantics:
+  annotation: "@Transactional（在 BaseControllerTest 类上）"
+  effect: "每个用例结束后**自动回滚**，用例之间不互相污染，也不需要手工清理"
+  why_it_works: >-
+    MockMvc **不发真实 HTTP 请求**，被测代码运行在与测试方法**相同的线程和事务**中
+    （BaseControllerTest.java 的类注释原文说明了这一点）。
+  caveats:
+    - "⚠️ 若将来改用真实端口，事务就不再共享，`@Transactional` 回滚会失效 —— 必须换成显式清理"
+    - "因为会回滚，JUnit 里**可以**自由使用种子账号做写操作（这是 JUnit 的特权，pytest 没有）"
+    - "⚠️ 但**不要改种子账号的密码**：BCrypt 写入后即使回滚，若测试在事务外有副作用（如日志）仍可能留下痕迹，且习惯不好"
+  implication_for_ai: >-
+    ✅ 需要"改数据但不污染环境"的用例优先用 JUnit —— 它天然隔离。
+    需要"验证真实提交后的可见性/序列化/过滤器链"的用例用 pytest。
+
+# ═══════════════════════════════════════════════════════════════
+# 3. 基类 API（只能用这些）
+# ═══════════════════════════════════════════════════════════════
+base_class:
+  fqcn: com.miqu.support.BaseControllerTest
+  annotations: ["@SpringBootTest", "@AutoConfigureMockMvc", "@Transactional"]
+  inherits: "所有 Controller 测试类都继承它（不要自己 new MockMvc）"
+  provided:
+    - {name: mockMvc, type: MockMvc, injection: "@Autowired protected", desc: "执行请求"}
+    - {name: objectMapper, type: ObjectMapper, injection: "@Autowired protected"}
+    - {name: LOGIN_URL, type: "static final String", value: "/api/auth/login"}
+    - {sig: "exec(MockHttpServletRequestBuilder builder) -> JsonNode", desc: "执行请求并解析统一响应体；**响应体为空会抛 AssertionError 并带上 HTTP 状态码**"}
+    - {sig: "login(String username, String password) -> String", desc: "用种子账号登录并返回 token；拿不到 token 会抛 AssertionError"}
+    - {sig: "bearer(String token) -> String", desc: "拼成 'Bearer <token>'"}
+  typical_autowire:
+    - field: "JwtTokenProvider jwtTokenProvider"
+      use: "**自己签发 Token**，用于构造「禁用前的旧 Token」这类无法通过登录拿到的场景"
+
+# ═══════════════════════════════════════════════════════════════
+# 4. 断言范式（两条铁律）
+# ═══════════════════════════════════════════════════════════════
+assertion_style:
+  rule_1_http_is_always_200:
+    wrong: ".andExpect(status().isForbidden())"
+    right: ".andExpect(status().isOk()).andExpect(jsonPath(\"$.code\").value(403))"
+    why: "GlobalExceptionHandler 所有分支都返回 HTTP 200，业务结果只看 body.code（XC-001）"
+    note: "本项目的 JUnit 一律写 status().isOk()，这是**故意**的，不是笔误"
+  rule_2_message_is_assertable:
+    right: ".andExpect(jsonPath(\"$.message\").value(\"需要互相关注后才能私聊\"))"
+    caveat: >-
+      ⚠️ message 可断言的场景见 api/error_codes.yaml 的 `message_assertable` 字段。
+      PARAM_INVALID / FORBIDDEN / INTERNAL_ERROR 这几个被复用或被覆盖文案，
+      **不要**断它们的默认文案。
+  two_styles_coexist:
+    - "MockMvc 的 jsonPath（主流）"
+    - "AssertJ 的 assertThat（取到 JsonNode 后再断言，用于复杂结构）"
+
+# ═══════════════════════════════════════════════════════════════
+# 5. 测试类清单（291 条 / 21 个类）
+# ═══════════════════════════════════════════════════════════════
+test_classes:
+  desc: "按包分组。⚠️ 生成新测试类时放在对应包下，不要都塞到根包。"
+  classes:
+    - {path: "MiquApplicationTests", pkg: "com.miqu", tests: 4, target: "上下文加载"}
+    - {path: "auth/AuthControllerTest", pkg: "com.miqu.auth", tests: 19, target: "注册/登录/退出/禁用后 Token 失效"}
+    - {path: "user/UserControllerTest", pkg: "com.miqu.user", tests: 20, target: "me 系列/资料/密码/头像/白名单边界"}
+    - {path: "user/UserSearchTest", pkg: "com.miqu.user", tests: 16, target: "搜索与 LIKE 转义"}
+    - {path: "follow/FollowControllerTest", pkg: "com.miqu.follow", tests: 26, target: "关注/取关/列表"}
+    - {path: "post/PostControllerTest", pkg: "com.miqu.post", tests: 31, target: "动态全量"}
+    - {path: "post/PostLikeControllerTest", pkg: "com.miqu.post", tests: 12, target: "点赞"}
+    - {path: "comment/CommentControllerTest", pkg: "com.miqu.comment", tests: 20, target: "评论"}
+    - {path: "message/ConversationControllerTest", pkg: "com.miqu.message", tests: 22, target: "会话（含互关）"}
+    - {path: "message/MessageControllerTest", pkg: "com.miqu.message", tests: 17, target: "私信（含互关）"}
+    - {path: "notification/NotificationControllerTest", pkg: "com.miqu.notification", tests: 19, target: "通知"}
+    - {path: "report/ReportControllerTest", pkg: "com.miqu.report", tests: 13, target: "举报提交与处置"}
+    - {path: "admin/AdminAccessControlTest", pkg: "com.miqu.admin", tests: 4, target: "后台越权矩阵"}
+    - {path: "admin/AdminUserControllerTest", pkg: "com.miqu.admin", tests: 14, target: "用户管理"}
+    - {path: "admin/AdminContentControllerTest", pkg: "com.miqu.admin", tests: 13, target: "动态/评论管理"}
+    - {path: "admin/AdminReportControllerTest", pkg: "com.miqu.admin", tests: 18, target: "举报处置"}
+    - {path: "admin/AdminStatsControllerTest", pkg: "com.miqu.admin", tests: 9, target: "统计"}
+    - {path: "common/ResponseSerializationTest", pkg: "com.miqu.common", tests: 6, target: "序列化契约（id 字符串 / 计数数字）"}
+    - {path: "common/EntitySchemaConsistencyTest", pkg: "com.miqu.common", tests: 2, target: "实体字段与 schema 一致"}
+    - {path: "common/SeedPasswordTest", pkg: "com.miqu.common", tests: 2, target: "守护种子 BCrypt 哈希 == encode('123456')"}
+    - {path: "controller/HealthControllerTest", pkg: "com.miqu.controller", tests: 4, target: "健康检查"}
+  coverage_gaps:
+    - "❌ 文件上传（POST /api/files/image）**没有 JUnit 覆盖** —— 只在 pytest（test_file.py 16 条）里"
+    - "❌ 并发场景**没有 JUnit 覆盖** —— MockMvc 是单线程模型，测不了竞态；只在 pytest"
+    - "❌ 前端状态一致性**没有 JUnit 覆盖** —— 见 execution/browser_contract.yaml"
+
+# ═══════════════════════════════════════════════════════════════
+# 6. 可复制模板
+# ═══════════════════════════════════════════════════════════════
+templates:
+
+  - id: JT-01
+    name: 标准控制器测试类骨架
+    code: |
+      package com.miqu.post;
+
+      import com.miqu.support.BaseControllerTest;
+      import org.junit.jupiter.api.DisplayName;
+      import org.junit.jupiter.api.Test;
+      import org.springframework.http.MediaType;
+
+      import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+      import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+      import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+      import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+      import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+      @DisplayName("动态接口 /api/posts")
+      class PostControllerTest extends BaseControllerTest {
+
+          @Test
+          @DisplayName("未登录发动态 → 401")
+          void create_withoutToken() throws Exception {
+              mockMvc.perform(post("/api/posts")
+                              .contentType(MediaType.APPLICATION_JSON)
+                              .content("{\"content\":\"hi\"}"))
+                      .andExpect(status().isOk())              // HTTP 恒 200
+                      .andExpect(jsonPath("$.code").value(401)) // 业务码才是断言对象
+                      .andExpect(jsonPath("$.message").value("未登录或登录状态已失效"));
+          }
+      }
+
+  - id: JT-02
+    name: 带 Token 的业务用例
+    code: |
+      @Test
+      @DisplayName("关注自己 → 400")
+      void follow_self() throws Exception {
+          String token = login("test001", "123456");     // 基类方法
+          mockMvc.perform(post("/api/users/2/follow")     // test001 的 id 是 2
+                          .header("Authorization", bearer(token)))
+                  .andExpect(status().isOk())
+                  .andExpect(jsonPath("$.code").value(400))
+                  .andExpect(jsonPath("$.message").value("不能关注自己"));
+      }
+
+  - id: JT-03
+    name: 自己签发 Token（测"禁用前的旧 Token"这类场景）
+    code: |
+      // 关键技巧：被测账号已被禁用时，**登录接口拿不到 token**，
+      // 必须用 JwtTokenProvider 直接签一个"合法但所属账号已失效"的 Token，
+      // 才能验证"每请求查库校验状态"这条实现。
+      @Autowired
+      private JwtTokenProvider jwtTokenProvider;
+
+      @Test
+      @DisplayName("账号被禁用后，已签发的旧 Token 立即失效 → 423")
+      void tokenIssuedBeforeBanIsRejected() throws Exception {
+          // banned001（id=12）状态为禁用，只能直接签发 Token
+          String token = jwtTokenProvider.generate(12L, "banned001", 1);
+
+          mockMvc.perform(get("/api/users/me").header("Authorization", bearer(token)))
+                  .andExpect(status().isOk())
+                  .andExpect(jsonPath("$.code").value(423))
+                  .andExpect(jsonPath("$.message").value("账号已被禁用，请联系管理员"));
+      }
+    role_parameter_note: "generate 的第三个参数是 role（1=USER，2=ADMIN）。测越权时传 2 可伪造管理员身份 —— 但**注意**这样绕过了真实登录，只用于边界探测。"
+
+  - id: JT-04
+    name: 读响应体后用 AssertJ 断言复杂结构
+    code: |
+      @Test
+      @DisplayName("动态详情：图片顺序与数量")
+      void postDetail_images() throws Exception {
+          String token = login("test001", "123456");
+          JsonNode json = exec(get("/api/posts/1").header("Authorization", bearer(token)));
+
+          assertThat(json.path("code").asInt()).isEqualTo(200);
+          JsonNode data = json.path("data");
+          assertThat(data.path("id").asText()).isEqualTo("1");       // id 是字符串
+          assertThat(data.path("images")).hasSize(9);                // 种子绝对值（合法例外）
+          assertThat(data.path("likeCount").asInt()).isEqualTo(10);  // 计数是数字
+      }
+
+  - id: JT-05
+    name: 参数化边界
+    code: |
+      @ParameterizedTest
+      @ValueSource(strings = {"", "ab", "1abc", "a b", "a" + "b" * 20})
+      @DisplayName("非法用户名一律 400")
+      void register_invalidUsername(String username) throws Exception {
+          String body = objectMapper.writeValueAsString(Map.of(
+                  "username", username, "password", "123456",
+                  "nickname", "n", "email", "qa_x@miqu.test"));
+          mockMvc.perform(post("/api/auth/register")
+                          .contentType(MediaType.APPLICATION_JSON).content(body))
+                  .andExpect(status().isOk())
+                  .andExpect(jsonPath("$.code").value(400));
+      }
+
+  - id: JT-06
+    name: 越权矩阵（参数化"未登录 / 非管理员 / 管理员"）
+    code: |
+      private static final List<String> ADMIN_GET_PATHS = List.of(
+              "/api/admin/stats", "/api/admin/users", "/api/admin/posts",
+              "/api/admin/comments", "/api/admin/reports", "/api/admin/logs");
+
+      @ParameterizedTest
+      @MethodSource("adminPaths")
+      @DisplayName("后台 GET：未登录 401 / 普通用户 403 / 管理员 200")
+      void adminAccessMatrix(String path) throws Exception {
+          mockMvc.perform(get(path))
+                  .andExpect(status().isOk())
+                  .andExpect(jsonPath("$.code").value(401));
+
+          mockMvc.perform(get(path).header("Authorization", bearer(login("test001", "123456"))))
+                  .andExpect(status().isOk())
+                  .andExpect(jsonPath("$.code").value(403));
+
+          mockMvc.perform(get(path).header("Authorization", bearer(login("admin", "123456"))))
+                  .andExpect(status().isOk())
+                  .andExpect(jsonPath("$.code").value(200));
+      }
+
+      static Stream<String> adminPaths() { return ADMIN_GET_PATHS.stream(); }
+    coverage_gap: >-
+      ⚠️ 现有实现只覆盖 **7 个 GET**。4 个**写**接口（PUT users/{id}/status、
+      DELETE posts/{id}、DELETE comments/{id}、PUT reports/{id}/handle）**未纳入矩阵** ——
+      这是推荐补的覆盖增量。
+
+# ═══════════════════════════════════════════════════════════════
+# 7. 反模式
+# ═══════════════════════════════════════════════════════════════
+anti_patterns:
+  - id: JAP-01
+    wrong: ".andExpect(status().is4xxClientError())"
+    why: "HTTP 恒 200，这条断言恒假"
+    right: ".andExpect(jsonPath(\"$.code\").value(403))"
+  - id: JAP-02
+    wrong: "自己 new MockMvc 或加 @AutoConfigureMockMvc 到子类"
+    why: "基类已配好；重复配置会启动多个上下文，测试变慢"
+    right: "继承 BaseControllerTest"
+  - id: JAP-03
+    wrong: "去掉 @Transactional 以「让数据真的落库」"
+    why: "会污染后续用例（JUnit 依赖种子绝对值）"
+    right: "需要真实落库验证的用例改用 pytest"
+  - id: JAP-04
+    wrong: "断言 PARAM_INVALID 的默认文案「参数校验失败」"
+    why: "实际几乎总是被替换成具体字段文案"
+    right: "断言具体文案，或只断 code"
+  - id: JAP-05
+    wrong: "在 JUnit 里写多线程并发用例"
+    why: "MockMvc 事务与线程绑定，多线程下回滚失效；且项目已把并发放在 pytest"
+    right: "并发用例放 tests/api/test_concurrency.py"
+  - id: JAP-06
+    wrong: "为 EMPTY_COMMENT / targetType=4 的 INVALID_TARGET_TYPE 写用例"
+    why: "死分支，必然拿不到预期码（rules/validation_order.yaml §4）"
+    right: "先查死分支清单"
+  - id: JAP-07
+    wrong: "忘了先重置数据库就跑 mvn test"
+    why: "种子绝对值断言漂移 → 大面积红，误判为代码缺陷"
+    right: "先重置库"
+  - id: JAP-08
+    wrong: "注册固定用户名做写操作（不用随机后缀）"
+    why: "回滚虽能兜住，但一旦用例失败在事务外，残留会撞唯一键"
+    right: "用 UUID 后缀"
+
+# ═══════════════════════════════════════════════════════════════
+# 8. 选型建议（AI 决定"这条用例写在哪"）
+# ═══════════════════════════════════════════════════════════════
+when_to_use:
+  junit:
+    - "规则密集的分支覆盖（校验顺序、越权组合、状态迁移）"
+    - "依赖种子数据绝对值断言的用例"
+    - "需要构造「不可能通过 API 达到」的前置（如已禁用账号的旧 Token）"
+    - "需要隔离环境、不想污染数据的写操作用例"
+  pytest:
+    - "端到端契约：序列化类型、响应信封、分页结构"
+    - "跨接口流程（注册→登录→发帖→互动）"
+    - "过滤器链与拦截器链的实际行为"
+    - "文件上传与其他涉及真实 I/O 的场景"
+    - "并发竞态（唯一键兜底）"
+  browser:
+    - "前端状态一致性（标签与数据是否同源）"
+    - "UI 降级行为（头像加载失败）"
+  nowhere:
+    - "数十线程同一瞬间首建会话（CONC-007，属压测范畴，当前未做）"
+    - "前端单元/组件测试（项目有意不引入 Vitest）"
+
+ai_checklist:
+  - "先判断这条用例该放哪：见 §8 when_to_use"
+  - "HTTP 一律 status().isOk()，断言 jsonPath(\"$.code\")"
+  - "message 断言前查 api/error_codes.yaml 的 message_assertable"
+  - "跑之前先重置数据库（§1）"
+  - "别写并发用例（放 pytest）"

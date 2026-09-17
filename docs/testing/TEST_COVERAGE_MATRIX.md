@@ -13,9 +13,9 @@
 |---|---|
 | 后端接口 | **50**（16 个 Controller） |
 | JUnit 用例 | **291**（21 个测试类） |
-| pytest 用例 | **248**（13 个文件） |
-| 浏览器回归断言 | **12**（`tests/browser_regression.mjs`，不参与 pytest 收集） |
-| 自动化用例合计 | **539**（JUnit + pytest）／ **551**（含浏览器层） |
+| pytest 用例 | **250**（13 个文件） |
+| 浏览器回归断言 | **15**（`tests/browser_regression.mjs`，不参与 pytest 收集） |
+| 自动化用例合计 | **541**（JUnit + pytest）／ **556**（含浏览器层） |
 | 有 pytest 端到端覆盖的接口 | 50 / 50 |
 | YAML 登记的核心规则 | 见 `test_cases/` |
 
@@ -42,10 +42,10 @@
 | 健康 `/api/health` | 1 | —（`conftest` 探活） | — | `HealthControllerTest` | 4 |
 | 管理后台 `/api/admin` | 11 | `test_admin.py` | 53 | `AdminAccessControlTest`、`AdminUserControllerTest`、`AdminContentControllerTest`、`AdminReportControllerTest`、`AdminStatsControllerTest` | 4 + 14 + 13 + 18 + 9 |
 | **跨模块** | — | `test_concurrency.py` | **6** | `ResponseSerializationTest`、`EntitySchemaConsistencyTest`、`SeedPasswordTest`、`MiquApplicationTests` | 6 + 2 + 2 + 4 |
-| 合计 | **50** | 13 个文件 | **248** | 21 个类 | **291** |
+| 合计 | **50** | 13 个文件 | **250** | 21 个类 | **291** |
 
 > 前端状态一致性不在本表的接口维度里——它没有对应的接口缺陷。
-> 12 项断言见 `tests/browser_regression.mjs`，
+> 15 项断言见 `tests/browser_regression.mjs`，
 > YAML 登记为 `CONC-008` ~ `CONC-011`（`ui_race_rules` 段）。
 
 ---
@@ -177,7 +177,7 @@
 | 核对项 | 结论 |
 |---|---|
 | `README` 接口数 38 → 实际 50 | **已更正** |
-| `README` 用例数 518 / pytest 229 → 实际 539（JUnit 291 + pytest 248） | **已更正** |
+| `README` 用例数 518 / pytest 229 → 实际 541（JUnit 291 + pytest 250） | **已更正** |
 | `tests/README.md` 引用的 4 个文件不存在 | **已补齐**（成为本次新增的 4 个文件） |
 | `docs/design.md` §4 接口清单不全 | README 已改指向 `docs/api/README.md`（全量 50 接口的权威文档） |
 | `test_cases/` 目录不存在 | **已建立**最小体系（不复制 pytest） |

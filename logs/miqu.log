@@ -1,27 +1,72 @@
-2026-09-16 18:03:38.038 [background-preinit] INFO  o.h.validator.internal.util.Version - HV000001: Hibernate Validator 8.0.2.Final
-2026-09-16 18:03:38.072 [main] INFO  com.miqu.MiquApplication - Starting MiquApplication using Java 25 with PID 38480 (D:\Projects\Miqu\backend\target\classes started by 张志鹏 in D:\Projects\Miqu)
-2026-09-16 18:03:38.092 [main] DEBUG com.miqu.MiquApplication - Running with Spring Boot v3.4.7, Spring v6.2.8
-2026-09-16 18:03:38.092 [main] INFO  com.miqu.MiquApplication - The following 1 profile is active: "local"
-2026-09-16 18:03:39.230 [main] INFO  o.s.b.w.e.tomcat.TomcatWebServer - Tomcat initialized with port 8081 (http)
-2026-09-16 18:03:39.245 [main] INFO  o.a.coyote.http11.Http11NioProtocol - Initializing ProtocolHandler ["http-nio-8081"]
-2026-09-16 18:03:39.249 [main] INFO  o.a.catalina.core.StandardService - Starting service [Tomcat]
-2026-09-16 18:03:39.249 [main] INFO  o.a.catalina.core.StandardEngine - Starting Servlet engine: [Apache Tomcat/10.1.42]
-2026-09-16 18:03:39.315 [main] INFO  o.a.c.c.C.[Tomcat].[localhost].[/] - Initializing Spring embedded WebApplicationContext
-2026-09-16 18:03:39.315 [main] INFO  o.s.b.w.s.c.ServletWebServerApplicationContext - Root WebApplicationContext: initialization completed in 1180 ms
-2026-09-16 18:03:39.578 [main] DEBUG c.m.security.JwtAuthenticationFilter - Filter 'jwtAuthenticationFilter' configured for use
-2026-09-16 18:03:40.179 [main] INFO  o.a.coyote.http11.Http11NioProtocol - Starting ProtocolHandler ["http-nio-8081"]
-2026-09-16 18:03:40.200 [main] INFO  o.s.b.w.e.tomcat.TomcatWebServer - Tomcat started on port 8081 (http) with context path '/'
-2026-09-16 18:03:40.206 [main] INFO  com.miqu.MiquApplication - Started MiquApplication in 2.709 seconds (process running for 3.078)
-2026-09-16 18:03:40.208 [main] INFO  com.zaxxer.hikari.HikariDataSource - MiquHikariPool - Starting...
-2026-09-16 18:03:40.329 [main] INFO  com.zaxxer.hikari.pool.HikariPool - MiquHikariPool - Added connection com.mysql.cj.jdbc.ConnectionImpl@581918f6
-2026-09-16 18:03:40.330 [main] INFO  com.zaxxer.hikari.HikariDataSource - MiquHikariPool - Start completed.
-2026-09-16 18:03:40.333 [main] INFO  com.miqu.MiquApplication - 数据库连接正常：jdbc:mysql://localhost:3306/miqu?serverTimezone=Asia/Shanghai&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true
-2026-09-16 18:03:40.335 [main] INFO  com.miqu.MiquApplication - 
+2026-09-17 13:02:01.605 [background-preinit] INFO  o.h.validator.internal.util.Version - HV000001: Hibernate Validator 8.0.2.Final
+2026-09-17 13:02:01.667 [main] INFO  com.miqu.MiquApplication - Starting MiquApplication v1.0.0 using Java 21.0.11 with PID 32020 (D:\Projects\Miqu\backend\target\miqu-backend-1.0.0.jar started by 张志鹏 in D:\Projects\Miqu)
+2026-09-17 13:02:01.667 [main] DEBUG com.miqu.MiquApplication - Running with Spring Boot v3.4.7, Spring v6.2.8
+2026-09-17 13:02:01.668 [main] INFO  com.miqu.MiquApplication - The following 1 profile is active: "local"
+2026-09-17 13:02:03.197 [main] INFO  o.s.b.w.e.tomcat.TomcatWebServer - Tomcat initialized with port 8081 (http)
+2026-09-17 13:02:03.217 [main] INFO  o.a.coyote.http11.Http11NioProtocol - Initializing ProtocolHandler ["http-nio-8081"]
+2026-09-17 13:02:03.220 [main] INFO  o.a.catalina.core.StandardService - Starting service [Tomcat]
+2026-09-17 13:02:03.220 [main] INFO  o.a.catalina.core.StandardEngine - Starting Servlet engine: [Apache Tomcat/10.1.42]
+2026-09-17 13:02:03.261 [main] INFO  o.a.c.c.C.[Tomcat].[localhost].[/] - Initializing Spring embedded WebApplicationContext
+2026-09-17 13:02:03.261 [main] INFO  o.s.b.w.s.c.ServletWebServerApplicationContext - Root WebApplicationContext: initialization completed in 1546 ms
+2026-09-17 13:02:03.845 [main] DEBUG c.m.security.JwtAuthenticationFilter - Filter 'jwtAuthenticationFilter' configured for use
+2026-09-17 13:02:04.915 [main] INFO  o.a.coyote.http11.Http11NioProtocol - Starting ProtocolHandler ["http-nio-8081"]
+2026-09-17 13:02:04.990 [main] INFO  o.s.b.w.e.tomcat.TomcatWebServer - Tomcat started on port 8081 (http) with context path '/'
+2026-09-17 13:02:04.997 [main] INFO  com.miqu.MiquApplication - Started MiquApplication in 3.979 seconds (process running for 4.45)
+2026-09-17 13:02:05.003 [main] INFO  com.zaxxer.hikari.HikariDataSource - MiquHikariPool - Starting...
+2026-09-17 13:02:05.241 [main] INFO  com.zaxxer.hikari.pool.HikariPool - MiquHikariPool - Added connection com.mysql.cj.jdbc.ConnectionImpl@4ed19b69
+2026-09-17 13:02:05.241 [main] INFO  com.zaxxer.hikari.HikariDataSource - MiquHikariPool - Start completed.
+2026-09-17 13:02:05.246 [main] INFO  com.miqu.MiquApplication - 数据库连接正常：jdbc:mysql://localhost:3306/miqu?serverTimezone=Asia/Shanghai&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true
+2026-09-17 13:02:05.251 [main] INFO  com.miqu.MiquApplication - 
 ----------------------------------------------------------
   Miqu 觅取社交系统启动完成
   接口文档: http://localhost:8081/swagger-ui.html
   健康检查: http://localhost:8081/api/health
 ----------------------------------------------------------
-2026-09-16 18:03:48.655 [http-nio-8081-exec-1] INFO  o.a.c.c.C.[Tomcat].[localhost].[/] - Initializing Spring DispatcherServlet 'dispatcherServlet'
-2026-09-16 18:03:48.657 [http-nio-8081-exec-1] INFO  o.s.web.servlet.DispatcherServlet - Initializing Servlet 'dispatcherServlet'
-2026-09-16 18:03:48.658 [http-nio-8081-exec-1] INFO  o.s.web.servlet.DispatcherServlet - Completed initialization in 1 ms
+2026-09-17 13:02:27.660 [http-nio-8081-exec-1] INFO  o.a.c.c.C.[Tomcat].[localhost].[/] - Initializing Spring DispatcherServlet 'dispatcherServlet'
+2026-09-17 13:02:27.662 [http-nio-8081-exec-1] INFO  o.s.web.servlet.DispatcherServlet - Initializing Servlet 'dispatcherServlet'
+2026-09-17 13:02:27.662 [http-nio-8081-exec-1] INFO  o.s.web.servlet.DispatcherServlet - Completed initialization in 0 ms
+2026-09-17 13:02:50.485 [http-nio-8081-exec-2] INFO  c.miqu.service.impl.AuthServiceImpl - 用户登录成功: userId=1, username=admin
+2026-09-17 13:02:50.550 [http-nio-8081-exec-3] INFO  c.miqu.service.impl.AuthServiceImpl - 用户登录成功: userId=2, username=test001
+2026-09-17 13:02:50.630 [http-nio-8081-exec-5] DEBUG c.m.exception.GlobalExceptionHandler - 业务异常 [PUT] /api/users/me/avatar -> 图片地址不合法，请先通过上传接口获取
+2026-09-17 13:02:50.730 [http-nio-8081-exec-6] INFO  c.miqu.service.impl.AuthServiceImpl - 用户注册成功: userId=22, username=qaord4d44b6a617
+2026-09-17 13:02:50.789 [http-nio-8081-exec-7] INFO  c.miqu.service.impl.AuthServiceImpl - 用户登录成功: userId=22, username=qaord4d44b6a617
+2026-09-17 13:02:50.840 [http-nio-8081-exec-8] INFO  c.miqu.service.impl.UserServiceImpl - 修改用户状态: targetUserId=22, status=0, operatorId=1
+2026-09-17 13:02:50.841 [http-nio-8081-exec-8] INFO  c.m.service.impl.AdminLogServiceImpl - 管理员操作: adminId=1, type=DISABLE_USER, target=(1, 22), ip=0:0:0:0:0:0:0:1
+2026-09-17 13:02:50.849 [http-nio-8081-exec-9] DEBUG c.m.exception.GlobalExceptionHandler - 业务异常 [PUT] /api/users/me/avatar -> 账号已被禁用，请联系管理员
+2026-09-17 13:02:50.853 [http-nio-8081-exec-10] DEBUG c.m.exception.GlobalExceptionHandler - 业务异常 [PUT] /api/users/me/avatar -> 账号已被禁用，请联系管理员
+2026-09-17 13:02:50.911 [http-nio-8081-exec-2] DEBUG c.m.exception.GlobalExceptionHandler - 业务异常 [GET] /api/users/me -> 账号已被禁用，请联系管理员
+2026-09-17 13:02:50.982 [http-nio-8081-exec-3] INFO  c.miqu.service.impl.AuthServiceImpl - 用户注册成功: userId=23, username=qaorda432af9d38
+2026-09-17 13:02:51.040 [http-nio-8081-exec-4] INFO  c.miqu.service.impl.AuthServiceImpl - 用户登录成功: userId=23, username=qaorda432af9d38
+2026-09-17 13:02:51.109 [http-nio-8081-exec-5] INFO  c.miqu.service.impl.AuthServiceImpl - 用户注册成功: userId=24, username=qaordbe1900aede
+2026-09-17 13:02:51.168 [http-nio-8081-exec-6] INFO  c.miqu.service.impl.AuthServiceImpl - 用户登录成功: userId=24, username=qaordbe1900aede
+2026-09-17 13:02:51.186 [http-nio-8081-exec-8] DEBUG c.m.exception.GlobalExceptionHandler - 业务异常 [POST] /api/messages -> 需要互相关注后才能私聊
+2026-09-17 13:02:51.195 [http-nio-8081-exec-9] DEBUG c.m.exception.GlobalExceptionHandler - 业务异常 [POST] /api/messages -> 不能给自己发送私信
+2026-09-17 13:02:51.214 [http-nio-8081-exec-2] DEBUG c.m.exception.GlobalExceptionHandler - 业务异常 [PUT] /api/admin/users/1/status -> 不能对自己执行该操作
+2026-09-17 13:02:51.273 [http-nio-8081-exec-3] INFO  c.miqu.service.impl.AuthServiceImpl - 用户注册成功: userId=25, username=qaord1f315c0a35
+2026-09-17 13:02:51.330 [http-nio-8081-exec-4] INFO  c.miqu.service.impl.AuthServiceImpl - 用户登录成功: userId=25, username=qaord1f315c0a35
+2026-09-17 13:02:51.385 [http-nio-8081-exec-5] INFO  c.miqu.service.impl.AuthServiceImpl - 用户注册成功: userId=26, username=qaord1c11797a72
+2026-09-17 13:02:51.439 [http-nio-8081-exec-6] INFO  c.miqu.service.impl.AuthServiceImpl - 用户登录成功: userId=26, username=qaord1c11797a72
+2026-09-17 13:02:51.459 [http-nio-8081-exec-7] DEBUG c.m.s.impl.NotificationServiceImpl - 生成通知: type=1, receiverId=26, actorId=25, postId=null
+2026-09-17 13:02:51.459 [http-nio-8081-exec-7] INFO  c.m.service.impl.FollowServiceImpl - 关注成功: followerId=25, followingId=26
+2026-09-17 13:02:51.489 [http-nio-8081-exec-9] INFO  c.m.service.impl.FollowServiceImpl - 取消关注: followerId=25, followingId=26
+2026-09-17 13:03:29.740 [http-nio-8081-exec-3] INFO  c.miqu.service.impl.AuthServiceImpl - 用户注册成功: userId=27, username=qadel113679b588
+2026-09-17 13:03:29.801 [http-nio-8081-exec-4] INFO  c.miqu.service.impl.AuthServiceImpl - 用户登录成功: userId=27, username=qadel113679b588
+2026-09-17 13:03:42.054 [http-nio-8081-exec-7] INFO  c.miqu.service.impl.AuthServiceImpl - 用户登录成功: userId=1, username=admin
+2026-09-17 13:04:46.744 [http-nio-8081-exec-9] INFO  c.miqu.service.impl.AuthServiceImpl - 用户登录成功: userId=1, username=admin
+2026-09-17 13:05:06.353 [http-nio-8081-exec-1] INFO  c.miqu.service.impl.AuthServiceImpl - 用户注册成功: userId=28, username=qadel7c2631a457
+2026-09-17 13:05:06.423 [http-nio-8081-exec-2] INFO  c.miqu.service.impl.AuthServiceImpl - 用户登录成功: userId=28, username=qadel7c2631a457
+2026-09-17 13:05:06.490 [http-nio-8081-exec-3] INFO  c.miqu.service.impl.AuthServiceImpl - 用户登录成功: userId=28, username=qadel7c2631a457
+2026-09-17 13:05:06.815 [http-nio-8081-exec-4] INFO  c.miqu.service.impl.AuthServiceImpl - 用户登录成功: userId=2, username=test001
+2026-09-17 13:05:06.879 [http-nio-8081-exec-6] INFO  c.miqu.service.impl.AuthServiceImpl - 用户登录成功: userId=1, username=admin
+2026-09-17 13:05:07.481 [http-nio-8081-exec-7] DEBUG c.m.exception.GlobalExceptionHandler - 业务异常 [GET] /api/users/me -> 未登录或登录状态已失效
+2026-09-17 13:05:07.505 [http-nio-8081-exec-9] DEBUG c.m.exception.GlobalExceptionHandler - 业务异常 [GET] /api/users/28 -> 用户不存在
+2026-09-17 13:05:07.516 [http-nio-8081-exec-10] DEBUG c.m.exception.GlobalExceptionHandler - 业务异常 [POST] /api/users/28/follow -> 用户不存在
+2026-09-17 13:05:07.525 [http-nio-8081-exec-1] DEBUG c.m.exception.GlobalExceptionHandler - 业务异常 [POST] /api/messages -> 用户不存在
+2026-09-17 13:05:07.535 [http-nio-8081-exec-2] DEBUG c.m.exception.GlobalExceptionHandler - 业务异常 [POST] /api/reports -> 用户不存在
+2026-09-17 13:26:52.437 [http-nio-8081-exec-5] INFO  c.miqu.service.impl.AuthServiceImpl - 用户登录成功: userId=1, username=admin
+2026-09-17 13:26:52.533 [http-nio-8081-exec-7] DEBUG c.m.exception.GlobalExceptionHandler - 业务异常 [PUT] /api/admin/reports/999999/handle -> 举报不存在
+2026-09-17 13:26:52.545 [http-nio-8081-exec-8] DEBUG c.m.exception.GlobalExceptionHandler - 业务异常 [PUT] /api/notifications/999999/read -> 通知不存在
+2026-09-17 13:26:52.587 [http-nio-8081-exec-9] DEBUG c.m.exception.GlobalExceptionHandler - 业务异常 [GET] /api/conversations/999999/messages -> 会话不存在
+2026-09-17 13:26:52.609 [http-nio-8081-exec-10] DEBUG c.m.exception.GlobalExceptionHandler - 业务异常 [DELETE] /api/comments/999999 -> 评论不存在或已被删除
+2026-09-17 13:26:52.688 [http-nio-8081-exec-1] INFO  c.miqu.service.impl.AuthServiceImpl - 用户登录成功: userId=2, username=test001
+2026-09-17 13:26:52.733 [http-nio-8081-exec-2] INFO  c.m.service.impl.FollowServiceImpl - 取消关注: followerId=2, followingId=4

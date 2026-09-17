@@ -3,11 +3,15 @@ package com.miqu.exception;
 import com.miqu.common.BizException;
 import com.miqu.common.ErrorCode;
 import com.miqu.common.Result;
+import com.miqu.config.MiquProperties;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.ConstraintViolationException;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.BindException;
 import org.springframework.validation.FieldError;
@@ -29,10 +33,16 @@ import java.util.stream.Collectors;
  *
  * <p>分层原则：**响应对用户友好，日志对开发者友好**。
  * 系统异常的完整堆栈只进日志，绝不回传前端（避免泄漏内部结构）。
+ *
+ * <p>注意它有**一条明确的例外**：{@code /uploads/**} 下缺失的静态资源返回真正的
+ * HTTP 404，而不是"HTTP 200 + body.code=404"。理由见 {@link #handleNoResource}。
  */
 @Slf4j
 @RestControllerAdvice
+@RequiredArgsConstructor
 public class GlobalExceptionHandler {
+
+    private final MiquProperties properties;
 
     // ================== 业务异常 ==================
 
@@ -158,10 +168,31 @@ public class GlobalExceptionHandler {
         return Result.fail(ErrorCode.PARAM_INVALID, "不支持的请求类型：" + e.getContentType());
     }
 
-    /** 静态资源或接口路径不存在。 */
+    /**
+     * 静态资源或接口路径不存在。
+     *
+     * <p>这里**按路径分两种语义**：
+     *
+     * <ul>
+     *   <li><b>上传的静态资源</b>（{@code /uploads/**}）返回**真正的 HTTP 404**。
+     *       浏览器 {@code <img>} 与 CDN 靠状态码判断"取不到"，包成 200 会让
+     *       {@code <img>} 拿到一段 JSON 去解码（必然失败），也会让缓存层把
+     *       "不存在的资源"当成一次成功响应。</li>
+     *   <li><b>业务接口</b>（{@code /api/**}）沿用项目约定——「HTTP 恒 200，
+     *       结果看响应体 {@code code}」——不改变既有对外契约。</li>
+     * </ul>
+     */
     @ExceptionHandler(NoResourceFoundException.class)
-    public Result<Void> handleNoResource(NoResourceFoundException e) {
-        return Result.fail(ErrorCode.NOT_FOUND, "请求的资源不存在");
+    public ResponseEntity<Result<Void>> handleNoResource(NoResourceFoundException e,
+                                                         HttpServletRequest request) {
+        Result<Void> body = Result.fail(ErrorCode.NOT_FOUND, "请求的资源不存在");
+
+        String staticPrefix = properties.getUpload().getUrlPrefix() + "/";
+        if (request != null && request.getRequestURI().startsWith(staticPrefix)) {
+            log.debug("静态资源不存在：{}", request.getRequestURI());
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(body);
+        }
+        return ResponseEntity.ok(body);
     }
 
     @ExceptionHandler(MaxUploadSizeExceededException.class)

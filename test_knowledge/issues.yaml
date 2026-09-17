@@ -1,0 +1,330 @@
+# 问题清单 —— UNKNOWN / INFERRED / CONFLICT / MISSING
+#
+# 用途：**不隐藏问题**。这是整套知识库诚实性的落点。
+#
+# 为什么必须单独成文：
+#   前 15 个文件都在陈述"事实是什么"。但真实项目里总有：
+#     · 文档与代码不一致（CONFLICT）
+#     · 只能推断不能确认（INFERRED）
+#     · 压根查不出来（UNKNOWN）
+#     · 知道该测但没测（MISSING）
+#   如果不集中登记，AI 就会在生成时**自行选一个版本**当作事实 —— 这正是要避免的。
+#
+# 消费者：
+#   LLM               → 🔴 **禁止把 UNKNOWN/INFERRED 当事实断言**；命中 CONFLICT 时以 code_reality 为准
+#   BusinessValidator → CONFLICT 项是拦截规则
+#   CoverageValidator → MISSING 项即"待覆盖清单"
+#
+# 真相来源：抽取过程与实测（见各项 evidence）
+# confidence: CONFIRMED（本文件记录的都是"已确认存在的问题"）
+# verified_at: 2026-09-17
+
+meta:
+  generated_at: 2026-09-17
+  categories:
+    CONFLICT: "两个来源说法不一致 —— **以代码/实测为准**，并把另一方登记为滞后"
+    INFERRED: "由代码逻辑推断但未实测 —— 使用前须实测"
+    UNKNOWN: "无法确认 —— **禁止当作事实**"
+    MISSING: "已知该测但没测/不可达 —— 覆盖缺口"
+  handling_rules:
+    - "CONFLICT：断言依据 = code_reality（代码实际），**不得**用 doc_claim"
+    - "INFERRED：先探针实测，实测后升级为 CONFIRMED 并更新知识库"
+    - "UNKNOWN：不生成依赖它的用例；要么取证，要么跳过"
+    - "MISSING：可作为「待补覆盖」目标；标 unreachable 的不计入分母"
+  counts:
+    conflict: 6
+    inferred: 4
+    unknown: 4
+    missing: 9
+
+# ═══════════════════════════════════════════════════════════════
+# CONFLICT —— 文档与代码不一致（以代码为准）
+# ═══════════════════════════════════════════════════════════════
+conflicts:
+
+  - id: C-01
+    severity: P0
+    topic: 头像 URL 是否校验 /uploads/ 前缀
+    doc_claim: "docs/api/users.md:290-291,335 称「头像 URL 不做 startsWith('/uploads/') 前缀校验」「不要写外链 400 的断言」"
+    code_reality: "UserServiceImpl.java:101-104 **明确校验**；外链返回 400 INVALID_IMAGE_URL"
+    verified: "2026-09-17 实测：PUT /api/users/me/avatar {avatar: 'https://evil.example/x.png'} → 400「图片地址不合法，请先通过上传接口获取」"
+    verdict: "**以代码为准**。文档停留在 BUG-005 修复（2026-09-14）之前的描述"
+    ai_impact: "🔴 AI 读文档会生成**反向错误**的断言（断言 200，实际 400）"
+    cross_ref: [USER-004, SEC-011, docs/testing/bug_report.md BUG-005]
+
+  - id: C-02
+    severity: P1
+    topic: EMPTY_COMMENT 错误码是否可达
+    doc_claim: "ErrorCode 中定义了 EMPTY_COMMENT(400, '评论内容不能为空')，API 文档也列出"
+    code_reality: "**全库无任何引用**（死枚举）；空评论由 CommentCreateRequest 的 @NotBlank 在参数层拦为 400 PARAM_INVALID，文案「评论内容不能为空」"
+    verified: "2026-09-17 唯一一处是 ErrorCode.java 的定义本身；源码全文搜索无使用点"
+    verdict: "以代码为准：**该枚举不可达**"
+    ai_impact: "🟠 AI 会断言一个永不出现的枚举名"
+    cross_ref: [CMT-001, validation_order.yaml DB-01]
+
+  - id: C-03
+    severity: P1
+    topic: 举报 targetType=4 的返回码
+    doc_claim: "docs/api/reports.md 称传 targetType=4 返回 INVALID_TARGET_TYPE"
+    code_reality: "CreateReportRequest 的 @Max(3) 在参数层先拦为 400 PARAM_INVALID；ReportServiceImpl.java:74-76 的 INVALID_TARGET_TYPE 分支**不可达**"
+    verified: "2026-09-17 实测：POST /api/reports {targetType: 4} → 400「举报目标类型只能是 1、2 或 3」"
+    verdict: "以代码为准"
+    ai_impact: "🟠 同上（断言了不可达分支）"
+    cross_ref: [RPT-001, validation_order.yaml DB-02]
+
+  - id: C-04
+    severity: P0
+    topic: 处理不存在的举报时的返回码
+    doc_claim: "知识库早期版本（api/endpoints.yaml）记为 **code=400** + error_code=NOT_FOUND"
+    code_reality: "**code=404**。ReportServiceImpl.java:162-164 用的是 `BizException.of(ErrorCode.NOT_FOUND, \"举报不存在\")`，而 NOT_FOUND 自带 code=404"
+    verified: "2026-09-17 实测：PUT /api/admin/reports/999999/handle（admin 身份）→ {\"code\":404,\"message\":\"举报不存在\"}"
+    verdict: "**以实测为准，已就地修正 endpoints.yaml**"
+    ai_impact: "🔴 原记录会让 AI 断言 400，实际 404 —— 用例必然失败"
+    note: "唯一正确的部分：message **确实被覆盖**为「举报不存在」，不是 NOT_FOUND 默认的「资源不存在」"
+    cross_ref: [RPT-004, endpoints.yaml PUT_ADMIN_REPORTS_ID_HANDLE]
+
+  - id: C-05
+    severity: P2
+    topic: 举报域缺少 ID 前缀
+    doc_claim: "docs/testing/TEST_CASE_SCHEMA.md 定义了 14 个前缀（AUTH/USER/FOL/POST/LIKE/CMT/CONV/MSG/NOTI/SRCH/FILE/SEC/CONC/SMK）"
+    code_reality: "**没有举报域前缀** —— SRCH 已被定义为「搜索」（对应 test_search.py）"
+    verdict: "本知识库为举报规则使用 `RPT-` 前缀，但该前缀**尚未被 check_consistency.py 的 VALID_PREFIXES 接受**"
+    ai_impact: "🟠 RPT-* 只能存在于 test_knowledge/，**不得写入 test_cases/**，否则 check_consistency.py 会报未知前缀"
+    recommended_confirmation: "若要登记进 test_cases/，先扩展 VALID_PREFIXES 加入 RPT"
+    cross_ref: [report_rules, test_cases/check_consistency.py:34-37]
+
+  - id: C-06
+    severity: P2
+    topic: 未识别的唯一键冲突被映射为通用 409，日志文案有误导性
+    doc_claim: "GlobalExceptionHandler 按索引名把 DuplicateKeyException 翻译为具体业务码"
+    code_reality: "只有 6 个索引被登记（uk_username / uk_email / uk_follower_following / uk_post_user / uk_users / uk_reporter_target）；**未登记的会落到 UNKNOWN → CONFLICT(409)**，并打日志 `未映射的唯一约束冲突：...`"
+    verdict: "行为本身合理（兜底为 409），但日志里的「未映射」会让排查者以为出了 bug"
+    ai_impact: "🟢 生成用例时不要把「409 + 通用文案」当作异常情况"
+    recommended_confirmation: "新增索引时同步 resolveConstraint 的映射表"
+    cross_ref: ["validation_order.yaml → layer_order.layers[5]（唯一键兜底层）"]
+
+# ═══════════════════════════════════════════════════════════════
+# INFERRED —— 推断但未实测（使用前须实测）
+# ═══════════════════════════════════════════════════════════════
+inferred:
+
+  - id: I-01
+    topic: 「自己被禁用 + 关注自己」的返回码
+    inference: "CANNOT_FOLLOW_SELF(400) 先命中 —— 因为自反校验写在 requireActiveUser 之前（FollowServiceImpl.java:50-56）"
+    basis: "源码顺序"
+    risk: "低（顺序明确）"
+    action: "若要断言，先探针实测；或改用「活跃用户关注自己」这种已覆盖的组合"
+
+  - id: I-02
+    topic: 「自己被禁用 + 给自己发私信」
+    inference: "DTO → userId.equals(receiverId) → 400 CANNOT_MESSAGE_SELF；但**账号被禁用时拦截器会先给 423**"
+    basis: "layer_order（认证层压制业务层）"
+    risk: "中 —— 这个组合的答案取决于「自己是否被禁用」"
+    action: "先实测；注意被禁用时是 423 而非 400"
+
+  - id: I-03
+    topic: 分页 size 超上限的具体钳制行为
+    inference: "size>50 被钳到 50，不报错"
+    basis: "data/test_data.yaml 已记录，但未见逐值实测"
+    risk: "低"
+    action: "生成用例如需精确断言 size 回显值，先实测"
+
+  - id: I-04
+    topic: page 超出范围的返回
+    inference: "返回空列表而非报错"
+    basis: "data/test_data.yaml 记录"
+    risk: "低"
+    action: "同上"
+
+# ═══════════════════════════════════════════════════════════════
+# UNKNOWN —— 无法确认（禁止当作事实）
+# ═══════════════════════════════════════════════════════════════
+unknowns:
+
+  - id: U-01
+    topic: username 大小写是否算重复（Alice vs alice）／email 无点 TLD 是否被 @Email 接受
+    why_unknown: >-
+      username 的查重是 eq 精确匹配（大小写敏感），但 MySQL 的 utf8mb4_0900_ai_ci 排序规则**本身是大小写不敏感**的，
+      唯一键 uk_username 的行为因此可能与应用层不一致。email 无点 TLD 是否通过取决于 Hibernate Validator 的实现细节。
+    impact: "🐛 **可能是一个真实缺陷**（应用层认为不同、数据库认为相同）"
+    ai_instruction: "🔴 **不要生成密码/用户名大小写的重复性用例**，也不要断言 409 或 200"
+    recommended_confirmation: "实测：注册 'AliceXxx1' 后尝试注册 'alicexxx1'，看返回 409 还是 200；并核对 uk_username 的排序规则"
+
+  - id: U-02
+    topic: conversation 的 CHECK 约束在真实并发下的行为
+    basis: "schema.sql:157 有 ck_user_order；Service 层用 Math.min/max 规整，正常不会违反"
+    ai_instruction: "不要生成「故意传反序触发 CHECK」的用例 —— 接口层无法直接指定 user1/user2"
+
+  - id: U-03
+    topic: 路径参数 id=0 的行为
+    detail: "0 是合法 Long，能匹配白名单正则 {id:[0-9]+}，但库中无 id=0 → 预期 404。**未见测试验证**"
+    ai_instruction: "若要生成，先实测确认 404 而非 400"
+    cross_ref: [data/test_data.yaml → special_id_values]
+
+  - id: U-04
+    topic: 负数 id 的行为
+    detail: "负号不匹配白名单正则 [0-9]+，因此未登录访问 /api/users/-1 会走登录校验（401）而非 404；已登录时路径变量能否绑定到 Long 需实测"
+    ai_instruction: "先实测，不要凭直觉断言"
+
+# ═══════════════════════════════════════════════════════════════
+# MISSING —— 已知缺口（可作为待补覆盖清单）
+# ═══════════════════════════════════════════════════════════════
+missing:
+
+  - id: M-01
+    severity: P1
+    gap: "「不能禁用另一个管理员」(403 CANNOT_DISABLE_ADMIN) 在 HTTP 层不可达"
+    reason: "种子只有 1 个管理员；管理员禁用自己时 CANNOT_OPERATE_SELF(400) 先命中 → 无输入可触达"
+    status: unreachable
+    registered_as: "SEC-004（status: gap）"
+    to_cover: "补第二个管理员种子账号；或写直接调 Service / 直接改库的集成测试"
+    ai_instruction: "🔴 **不要生成**这个用例 —— 必然拿不到 403"
+    cross_ref: [USER-013, USER-014, validation_order.yaml DB-03]
+
+  - id: M-02
+    severity: P2
+    gap: "AUTH / USER / POST / CMT / NOTI 五个域在 test_cases/*.yaml 层**完全没有登记**"
+    reason: "test_cases 有意只登记高价值用例（冻结规则 / 安全边界 / 并发 / 冒烟）"
+    status: by_design（不是缺陷），但**是知识缺口**
+    mitigation: "✅ 本知识库的 business_rules.yaml 已首次为这五个域建立结构化规则（这是知识库最大的补齐项之一）"
+    ai_instruction: "这五个域的规则以 business_rules.yaml 为准；**不要**去 test_cases/ 找"
+
+  - id: M-03
+    severity: P2
+    gap: "前端没有单元/组件测试"
+    reason: "项目未引入 Vitest / Jest"
+    status: by_design
+    mitigation: "前端状态层由 tests/browser_regression.mjs（15 项断言）兜底"
+    ai_instruction: "不要设计「前端组件单测」类任务；UI 行为放浏览器层"
+
+  - id: M-04
+    severity: P2
+    gap: "楼中楼 / 回复评论未实现"
+    reason: "comment.parent_id 与 reply_to_user_id 是预留列，API 完全不暴露"
+    status: by_design
+    ai_instruction: "不要生成楼中楼用例；可以断言「传 parentId 会被静默忽略」"
+
+  - id: M-05
+    severity: P1
+    gap: "SRCH（搜索）域**没有结构化规则条目**"
+    reason: "business_rules.yaml 与 test_cases 都没有 SRCH-* 规则；行为只在 api/test_search.py 与 UserSearchTest 里"
+    status: knowledge_gap
+    to_cover: "从 UserServiceImpl.search + SqlLikeUtils 抽取 SRCH-001..00N 规则"
+    ai_instruction: "🟠 生成搜索用例时只能用 api/endpoints.yaml 的 GET_USERS_SEARCH 段的事实；**不要**引用 SRCH-* 规则 ID（不存在）"
+    note: "⚠️ endpoints.yaml 的 GET_USERS_SEARCH 曾引用 SRCH-004..008（悬空引用），已于 2026-09-17 由 validate.py 检出并修正"
+    cross_ref: [endpoints.yaml GET_USERS_SEARCH]
+
+  - id: M-06
+    severity: P2
+    gap: "4 个端点未被 pytest 直接断言 + 1 个仅间接"
+    detail: "GET_HEALTH（仅探活）、GET_POSTS_ID_LIKES、GET_USERS_ID_FOLLOWING、GET_USERS_ID_FOLLOWERS 未覆盖；POST_REPORTS 仅当前置数据"
+    status: coverage_gap（这 5 个都有 JUnit 覆盖，属口径补齐）
+    to_cover: "pytest 补 4~5 条直接断言"
+    cross_ref: [existing_tests.yaml → incremental_opportunities IO-02/IO-03]
+
+  - id: M-07
+    severity: P1
+    gap: "管理后台 4 个写接口缺矩阵式访问控制断言"
+    detail: "test_admin.py 的 ADMIN_ENDPOINTS 只含 7 个 GET；PUT users/{id}/status、DELETE posts/{id}、DELETE comments/{id}、PUT reports/{id}/handle 缺「未登录 401 / 非管理员 403」"
+    status: coverage_gap
+    to_cover: "4 × 2 = 8 条 pytest 用例"
+    ai_instruction: "✅ 这是**推荐生成**的增量覆盖"
+    cross_ref: [permissions/permission_matrix.yaml PG-02, existing_tests.yaml IO-01]
+
+  - id: M-08
+    severity: P3
+    gap: "数十线程同一瞬间首建会话未压测"
+    reason: "只验证到 8 线程"
+    status: coverage_gap（属压测范畴）
+    registered_as: "CONC-007（status: gap）"
+    cross_ref: [CONV-015]
+
+  - id: M-09
+    severity: P3
+    gap: "真实多用户浏览器会话同时操作未验证"
+    reason: "browser_regression.mjs 只做单线程时序竞态（靠人为延迟放大窗口），无多浏览器编排"
+    status: verification_gap
+    cross_ref: [execution/browser_contract.yaml → cannot_use_browser]
+
+# ═══════════════════════════════════════════════════════════════
+# 已修复的历史问题（保留追溯，避免重复登记）
+# ═══════════════════════════════════════════════════════════════
+resolved:
+  - id: R-01
+    what: "头像外链未被拒（与动态图片校验不对称）"
+    fixed_at: 2026-09-14
+    how: "UserServiceImpl.java:101-104 加前缀校验"
+    regression: "pytest + JUnit 各 2 条（SEC-011 由 gap → implemented）"
+    cross_ref: [C-01]
+
+  - id: R-02
+    what: "头像取不到时永久破图（无 @error 兜底）"
+    fixed_at: 2026-09-16
+    how: "UserAvatar.vue 加 failed 状态 + @error 兜底 + watch(src) 重试"
+    regression: "browser_regression.mjs BUG-006.a/b/c"
+    cross_ref: [docs/testing/avatar-issue-diagnosis.md]
+
+  - id: R-03
+    what: "/uploads/** 缺失文件返回 HTTP 200 + JSON，导致 <img> 解码失败"
+    fixed_at: 2026-09-16
+    how: "GlobalExceptionHandler.handleNoResource 按 URI 分流：静态资源返真 404"
+    regression: "pytest 2 条（test_missing_uploaded_file_returns_real_404 + test_unknown_api_path_keeps_http_200）"
+    note: "⚠️ 这是「HTTP 恒 200」约定的**唯一例外**；对照用例钉住了 /api/** 未被波及"
+
+  - id: R-04
+    what: "会话并发首建被误报 409（REPEATABLE READ 快照读看不到并发提交）"
+    fixed_at: 2026-09-14
+    how: "ConversationServiceImpl 用 TransactionTemplate(REQUIRES_NEW) 重查"
+    evidence: "实测修复前 8 并发首建有 4 条被拒"
+
+  - id: R-05
+    what: "BUG-001（取消关注后关注流残留）"
+    fixed_at: "无需修复"
+    how: "**已证伪** —— 行为本来就是对的"
+    note: "保留 4 项浏览器断言作为固定回归守卫"
+
+  - id: R-06
+    what: "test_cases/*.yaml 有 4 处 YAML 语法错误（流式序列里的 `{`）"
+    fixed_at: 2026-09-16
+    how: "给 4 行加引号；并让 check_consistency.py 把 yaml.YAMLError 当问题报出（退出码 1）"
+    lesson: "校验脚本有降级分支时，必须确认它到底走了哪条分支，否则绿灯是假的"
+
+  - id: R-07
+    what: "test_knowledge/ 下 3 个 YAML **根本无法解析**（PyYAML 装上前无人发现）"
+    fixed_at: 2026-09-17
+    how: |
+      修掉三处具体语法错误：
+        · business_rules.yaml:94  `or` 作为**流式映射的键**会让 PyYAML 6.0.3 解析失败（改为 any_of 列表）
+        · data_model.yaml:249     值里内嵌裸 ASCII 双引号（改为「」）
+        · endpoints.yaml:659      `test_implication` 缩进比同级键多 2 空格，被当成序列元素（改回对齐）
+    lesson: "**「机器可读」的前提是先能解析。** 抽取完成后必须跑一次 yaml.safe_load 全量校验"
+    tooling: ".workbuddy/tools/fix_yaml_quotes.py（带安全闸）+ repair_yaml_quotes.py（回滚误伤）"
+
+  - id: R-08
+    what: "endpoints.yaml 的 PUT_ADMIN_REPORTS_ID_HANDLE 引用了不存在的 SRCH-004..008"
+    fixed_at: 2026-09-17
+    how: "改为 RPT-004..008；并在 validate.py 里加了悬空引用检查"
+    lesson: "引用型字段（related_rules / existing_cases）必须做**存在性校验**，不能只靠人眼"
+
+  - id: R-09
+    what: "business_rules.yaml 的 meta 声明 total_rules_in_this_file: 78，与实际不符"
+    fixed_at: 2026-09-17
+    how: "逐段统计后改为 total_rules_in_body: 86 + total_rule_ids_mentioned: 92，并附 count_breakdown"
+    lesson: "**文档里的计数是活的**，应由脚本校验而不是人工维护"
+
+  - id: R-10
+    what: "endpoints.yaml 记 PUT 举报不存在返回 code=400"
+    fixed_at: 2026-09-17
+    how: "实测为 **404**，已就地更正"
+    cross_ref: [C-04]
+
+# ═══════════════════════════════════════════════════════════════
+# AI 检查点
+# ═══════════════════════════════════════════════════════════════
+ai_checklist:
+  - "生成前扫一遍 CONFLICT：命中就用 code_reality，不要用 doc_claim"
+  - "UNKNOWN 段涉及的主题**一律不生成**（U-01..U-04）"
+  - "INFERRED 段若要断言，先把「实测」作为生成的一个步骤，而不是直接下结论"
+  - "MISSING 段里 status=unreachable 的**不计入覆盖分母**，也不要为它生成用例"
+  - "MISSING 段里 status=coverage_gap 且标注「推荐生成」的（M-06/M-07）是**优先补的空白**"
+  - "发现新的文档-代码不一致 → **登记到这里并修正知识库**，不要就地选一个版本"

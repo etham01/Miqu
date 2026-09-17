@@ -1,0 +1,523 @@
+# Miqu 数据模型事实
+#
+# 用途：AI 生成测试数据（合法/非法/边界值）与数据库层断言的依据。
+# 消费者：LLM（造数据）、Validator（校验字段名/枚举值是否存在）、执行器（生成 SQL 断言）
+#
+# 真相来源：
+#   database/schema.sql（表、字段、类型、约束、索引）
+#   backend/src/main/java/com/miqu/entity/**（实体映射、@TableLogic、自动填充）
+#   backend/src/main/java/com/miqu/common/enums/**（枚举取值）
+#   backend/src/main/java/com/miqu/common/BizConstants.java（边界值常量）
+#   backend/src/main/resources/application.yml（配置项）
+#
+# confidence: CONFIRMED（全部条目均逐字核对源码/DDL）
+
+meta:
+  database: miqu
+  engine: InnoDB
+  charset: utf8mb4
+  collation: utf8mb4_0900_ai_ci
+  datetime_precision: "DATETIME(3)（全部时间字段均为毫秒级）"
+  table_count: 11
+  physical_foreign_keys: false
+  fk_note: >-
+    **无物理外键**。引用完整性由 Service 层显式校验 + 唯一索引保证。
+    测试含义：数据库不会因外键报错；"目标不存在"必须由 Service 抛业务码。
+    → 不要生成"期望数据库外键约束报错"的用例。
+  logic_delete_strategy:
+    business_tables: "user / post / comment / message / notification 含 deleted 列，@TableLogic 软删除"
+    relation_tables: "follow / post_like / post_image / conversation / report / admin_operation_log **无 deleted 列**，物理删除或不可删"
+    mybatis_plus_config: {logic_delete_field: deleted, logic_delete_value: 1, logic_not_delete_value: 0,
+                          source: application.yml:75-76}
+    select_false: "BaseEntity.deleted 标注 select=false → **永不出现在 API 响应与查询结果中**"
+
+# ═════════════════════════════════════════════
+# 一、表结构
+# ═════════════════════════════════════════════
+tables:
+  - name: user
+    purpose: 用户
+    entity: User
+    base_class: BaseEntity
+    soft_delete: true
+    columns:
+      - {name: id, type: "BIGINT UNSIGNED", nullable: false, default: AUTO_INCREMENT, pk: true}
+      - {name: username, type: "VARCHAR(32)", nullable: false, unique: uk_username,
+         api_max_length: 20, note: "DDL 允许 32，但 DTO @Size(max=20) 更严；**以 20 为测试边界**"}
+      - {name: password, type: "VARCHAR(100)", nullable: false, note: "BCrypt 哈希，**永不返回给 API**"}
+      - {name: nickname, type: "VARCHAR(32)", nullable: false, index: idx_nickname}
+      - {name: email, type: "VARCHAR(64)", nullable: false, unique: uk_email}
+      - {name: gender, type: TINYINT, nullable: false, default: 0, enum: GenderEnum}
+      - {name: birthday, type: DATE, nullable: true}
+      - {name: bio, type: "VARCHAR(255)", nullable: false, default: "''"}
+      - {name: avatar, type: "VARCHAR(255)", nullable: false, default: "''"}
+      - {name: role, type: TINYINT, nullable: false, default: 1, enum: RoleEnum}
+      - {name: status, type: TINYINT, nullable: false, default: 1, enum: UserStatusEnum}
+      - {name: following_count, type: "INT UNSIGNED", nullable: false, default: 0, redundant_counter: true}
+      - {name: follower_count, type: "INT UNSIGNED", nullable: false, default: 0, redundant_counter: true}
+      - {name: post_count, type: "INT UNSIGNED", nullable: false, default: 0, redundant_counter: true}
+      - {name: deleted, type: TINYINT, nullable: false, default: 0, logic_delete: true}
+      - {name: create_time, type: "DATETIME(3)", nullable: false, default: "CURRENT_TIMESTAMP(3)", fill: INSERT}
+      - {name: update_time, type: "DATETIME(3)", nullable: false,
+         default: "CURRENT_TIMESTAMP(3) ON UPDATE", fill: INSERT_UPDATE}
+    indexes:
+      - {name: uk_username, columns: [username], unique: true, on_duplicate_maps_to: USERNAME_EXISTS}
+      - {name: uk_email, columns: [email], unique: true, on_duplicate_maps_to: EMAIL_EXISTS}
+      - {name: idx_nickname, columns: [nickname]}
+      - {name: idx_create_time, columns: [create_time]}
+
+  - name: follow
+    purpose: 关注关系
+    entity: Follow
+    base_class: BaseCreateEntity
+    soft_delete: false
+    physical_delete: true
+    columns:
+      - {name: id, type: "BIGINT UNSIGNED", nullable: false, default: AUTO_INCREMENT, pk: true}
+      - {name: follower_id, type: "BIGINT UNSIGNED", nullable: false, desc: "关注者（粉丝）"}
+      - {name: following_id, type: "BIGINT UNSIGNED", nullable: false, desc: "被关注者"}
+      - {name: create_time, type: "DATETIME(3)", nullable: false, default: "CURRENT_TIMESTAMP(3)", fill: INSERT}
+    no_update_time: true
+    indexes:
+      - {name: uk_follower_following, columns: [follower_id, following_id], unique: true,
+         on_duplicate_maps_to: ALREADY_FOLLOWED}
+      - {name: idx_following, columns: [following_id, create_time]}
+    test_critical: >-
+      **无 deleted 列 → 物理删除**。取消关注后唯一键立即释放，可马上重新关注（FOL-002）。
+      互关判定 = 同时存在 (A→B) 与 (B→A) 两行。
+
+  - name: post
+    purpose: 动态
+    entity: Post
+    base_class: BaseEntity
+    soft_delete: true
+    columns:
+      - {name: id, type: "BIGINT UNSIGNED", nullable: false, default: AUTO_INCREMENT, pk: true}
+      - {name: user_id, type: "BIGINT UNSIGNED", nullable: false, desc: 作者}
+      - {name: content, type: "VARCHAR(1000)", nullable: false, default: "''"}
+      - {name: like_count, type: "INT UNSIGNED", nullable: false, default: 0, redundant_counter: true}
+      - {name: comment_count, type: "INT UNSIGNED", nullable: false, default: 0, redundant_counter: true}
+      - {name: image_count, type: "TINYINT UNSIGNED", nullable: false, default: 0, range: "0~9",
+         redundant_counter: true}
+      - {name: deleted, type: TINYINT, nullable: false, default: 0, logic_delete: true}
+      - {name: create_time, type: "DATETIME(3)", nullable: false, default: "CURRENT_TIMESTAMP(3)", fill: INSERT}
+      - {name: update_time, type: "DATETIME(3)", nullable: false, default: "CURRENT_TIMESTAMP(3) ON UPDATE", fill: INSERT_UPDATE}
+    indexes:
+      - {name: idx_user_time, columns: [user_id, deleted, create_time], note: "create_time DESC"}
+      - {name: idx_time, columns: [deleted, create_time], note: "create_time DESC"}
+    no_unique_key: true
+    no_unique_key_note: "post 表**无唯一键**，同一用户可发无限条内容相同的动态（无去重）"
+
+  - name: post_image
+    purpose: 动态图片
+    entity: PostImage
+    base_class: BaseCreateEntity
+    soft_delete: false
+    physical_delete: true
+    columns:
+      - {name: id, type: "BIGINT UNSIGNED", nullable: false, default: AUTO_INCREMENT, pk: true}
+      - {name: post_id, type: "BIGINT UNSIGNED", nullable: false}
+      - {name: url, type: "VARCHAR(255)", nullable: false}
+      - {name: sort_order, type: "TINYINT UNSIGNED", nullable: false, default: 0, range: "0~8",
+         desc: "展示顺序，由服务端按 images 数组下标生成"}
+      - {name: create_time, type: "DATETIME(3)", nullable: false, default: "CURRENT_TIMESTAMP(3)", fill: INSERT}
+    no_update_time: true
+    indexes:
+      - {name: uk_post_sort, columns: [post_id, sort_order], unique: true,
+         on_duplicate_maps_to: "CONFLICT（未在 GlobalExceptionHandler 登记，落 UNKNOWN 分支）",
+         issue_ref: issues.yaml I-01}
+      - {name: idx_post, columns: [post_id, sort_order]}
+
+  - name: post_like
+    purpose: 点赞
+    entity: PostLike
+    base_class: BaseCreateEntity
+    soft_delete: false
+    physical_delete: true
+    columns:
+      - {name: id, type: "BIGINT UNSIGNED", nullable: false, default: AUTO_INCREMENT, pk: true}
+      - {name: post_id, type: "BIGINT UNSIGNED", nullable: false}
+      - {name: user_id, type: "BIGINT UNSIGNED", nullable: false}
+      - {name: create_time, type: "DATETIME(3)", nullable: false, default: "CURRENT_TIMESTAMP(3)", fill: INSERT}
+    no_update_time: true
+    indexes:
+      - {name: uk_post_user, columns: [post_id, user_id], unique: true, on_duplicate_maps_to: ALREADY_LIKED}
+      - {name: idx_user_time, columns: [user_id, create_time], note: "create_time DESC"}
+    test_critical: "**物理删除**（取消点赞必须释放唯一键），故取消后可立即重新点赞（LIKE-002）。"
+
+  - name: comment
+    purpose: 评论
+    entity: Comment
+    base_class: BaseEntity
+    soft_delete: true
+    columns:
+      - {name: id, type: "BIGINT UNSIGNED", nullable: false, default: AUTO_INCREMENT, pk: true}
+      - {name: post_id, type: "BIGINT UNSIGNED", nullable: false}
+      - {name: user_id, type: "BIGINT UNSIGNED", nullable: false}
+      - {name: content, type: "VARCHAR(500)", nullable: false,
+         no_default: true, note: "**无 DEFAULT**，插入必须显式提供"}
+      - {name: parent_id, type: "BIGINT UNSIGNED", nullable: true,
+         status: "预留，一期未使用，API 不暴露"}
+      - {name: reply_to_user_id, type: "BIGINT UNSIGNED", nullable: true,
+         status: "预留，一期未使用，API 不暴露"}
+      - {name: deleted, type: TINYINT, nullable: false, default: 0, logic_delete: true}
+      - {name: create_time, type: "DATETIME(3)", nullable: false, default: "CURRENT_TIMESTAMP(3)", fill: INSERT}
+      - {name: update_time, type: "DATETIME(3)", nullable: false, default: "CURRENT_TIMESTAMP(3) ON UPDATE", fill: INSERT_UPDATE}
+    indexes:
+      - {name: idx_post_time, columns: [post_id, deleted, create_time]}
+      - {name: idx_user, columns: [user_id, deleted]}
+    unimplemented_feature_warning: >-
+      ⚠️ parent_id / reply_to_user_id 存在但**功能未实现**（无楼中楼、无回复）。
+      → **禁止生成回复评论/楼中楼的测试用例**，没有对应的 API 参数。见 issues.yaml M-04。
+
+  - name: conversation
+    purpose: 私信会话
+    entity: Conversation
+    base_class: BaseEntityNoDelete
+    soft_delete: false
+    columns:
+      - {name: id, type: "BIGINT UNSIGNED", nullable: false, default: AUTO_INCREMENT, pk: true}
+      - {name: user1_id, type: "BIGINT UNSIGNED", nullable: false, desc: "**较小的** user id"}
+      - {name: user2_id, type: "BIGINT UNSIGNED", nullable: false, desc: "**较大的** user id"}
+      - {name: last_message_id, type: "BIGINT UNSIGNED", nullable: true}
+      - {name: last_message_preview, type: "VARCHAR(100)", nullable: false, default: "''",
+         truncation: "消息内容截断至 100 字符"}
+      - {name: last_message_time, type: "DATETIME(3)", nullable: true}
+      - {name: user1_unread, type: "INT UNSIGNED", nullable: false, default: 0, desc: "user1 的未读数（权威值）"}
+      - {name: user2_unread, type: "INT UNSIGNED", nullable: false, default: 0, desc: "user2 的未读数（权威值）"}
+      - {name: create_time, type: "DATETIME(3)", nullable: false, default: "CURRENT_TIMESTAMP(3)", fill: INSERT}
+      - {name: update_time, type: "DATETIME(3)", nullable: false, default: "CURRENT_TIMESTAMP(3) ON UPDATE", fill: INSERT_UPDATE}
+    no_deleted_column: true
+    constraints:
+      - {name: ck_user_order, type: CHECK, expr: "user1_id < user2_id",
+         test_implication: "直接 INSERT 时若把大 id 放 user1_id 会被 CHECK 拦下"}
+    indexes:
+      - {name: uk_users, columns: [user1_id, user2_id], unique: true,
+         on_duplicate_maps_to: "CONFLICT（通用码，非专用文案）",
+         note: "保证同一对用户只有一个会话"}
+      - {name: idx_user1_time, columns: [user1_id, last_message_time], note: DESC}
+      - {name: idx_user2_time, columns: [user2_id, last_message_time], note: DESC}
+    unread_semantics: >-
+      未读数是**两个独立计数器**，不是状态机。
+      当前登录用户是 user1 就读 user1_unread，是 user2 就读 user2_unread。
+      发消息时**只增接收方**的计数；markRead 时**只清自己**的计数。
+
+  - name: message
+    purpose: 私信消息
+    entity: Message
+    base_class: BaseEntity
+    soft_delete: true
+    soft_delete_note: "deleted 列存在（撤回功能预留），但**一期无撤回 API**"
+    columns:
+      - {name: id, type: "BIGINT UNSIGNED", nullable: false, default: AUTO_INCREMENT, pk: true}
+      - {name: conversation_id, type: "BIGINT UNSIGNED", nullable: false}
+      - {name: sender_id, type: "BIGINT UNSIGNED", nullable: false}
+      - {name: receiver_id, type: "BIGINT UNSIGNED", nullable: false}
+      - {name: content, type: "VARCHAR(1000)", nullable: false, no_default: true}
+      - {name: is_read, type: TINYINT, nullable: false, default: 0, mapping: "0=未读 1=已读"}
+      - {name: read_time, type: "DATETIME(3)", nullable: true}
+      - {name: deleted, type: TINYINT, nullable: false, default: 0, logic_delete: true}
+      - {name: create_time, type: "DATETIME(3)", nullable: false, default: "CURRENT_TIMESTAMP(3)", fill: INSERT}
+      - {name: update_time, type: "DATETIME(3)", nullable: false, default: "CURRENT_TIMESTAMP(3) ON UPDATE", fill: INSERT_UPDATE}
+    indexes:
+      - {name: idx_conv_id, columns: [conversation_id, id], note: "id DESC，支撑游标分页"}
+      - {name: idx_receiver_read, columns: [receiver_id, is_read]}
+    unimplemented_feature_warning: "**无撤回消息 API**，不要生成撤回用例"
+
+  - name: notification
+    purpose: 通知
+    entity: Notification
+    base_class: BaseEntity
+    soft_delete: true
+    columns:
+      - {name: id, type: "BIGINT UNSIGNED", nullable: false, default: AUTO_INCREMENT, pk: true}
+      - {name: user_id, type: "BIGINT UNSIGNED", nullable: false, desc: "**接收者**"}
+      - {name: type, type: TINYINT, nullable: false, no_default: true, enum: NotificationTypeEnum}
+      - {name: actor_id, type: "BIGINT UNSIGNED", nullable: false, desc: 触发者}
+      - {name: post_id, type: "BIGINT UNSIGNED", nullable: true}
+      - {name: comment_id, type: "BIGINT UNSIGNED", nullable: true}
+      - {name: message_id, type: "BIGINT UNSIGNED", nullable: true, status: "预留，一期未使用"}
+      - {name: content, type: "VARCHAR(255)", nullable: false, default: "''",
+         note: "内容快照，截断至 NOTIFICATION_SNAPSHOT_LENGTH=50 字符"}
+      - {name: is_read, type: TINYINT, nullable: false, default: 0}
+      - {name: deleted, type: TINYINT, nullable: false, default: 0, logic_delete: true}
+      - {name: create_time, type: "DATETIME(3)", nullable: false, default: "CURRENT_TIMESTAMP(3)", fill: INSERT}
+      - {name: update_time, type: "DATETIME(3)", nullable: false, default: "CURRENT_TIMESTAMP(3) ON UPDATE", fill: INSERT_UPDATE}
+    indexes:
+      - {name: idx_user_read_time, columns: [user_id, is_read, create_time], note: "create_time DESC"}
+      - {name: idx_user_actor_post_type, columns: [user_id, actor_id, post_id, type],
+         # ⚠️ 2026-09-17 修正：原值内嵌裸 ASCII 双引号（"支撑"…""），PyYAML 无法解析，改为「」
+         note: "支撑「取消关注/点赞时精确删除对应通知」"}
+    physical_delete_cases: >-
+      ⚠️ 表有 deleted 列（软删除），但**取消关注/取消点赞时是物理删除**对应通知行
+      （removeFollowNotification / removeLikeNotification / removePostNotifications）。
+      → 直接 SQL 断言时，被撤销动作产生的通知**行已不存在**，不是 deleted=1。
+
+  - name: report
+    purpose: 举报
+    entity: Report
+    base_class: BaseEntityNoDelete
+    soft_delete: false
+    no_deleted_column: true
+    no_deleted_reason: "举报是流程记录，不可删除"
+    historical_bug: >-
+      ⚠️ Report 曾**误继承 BaseEntity**（带 @TableLogic），而 report 表无 deleted 列
+      → 首次查询即 SQL 报错 Unknown column。已由 BaseEntityNoDelete 修复，
+      并沉淀为 EntitySchemaConsistencyTest 防护。见 MIQU_TEST_SYSTEM.md §8。
+    columns:
+      - {name: id, type: "BIGINT UNSIGNED", nullable: false, default: AUTO_INCREMENT, pk: true}
+      - {name: reporter_id, type: "BIGINT UNSIGNED", nullable: false}
+      - {name: target_type, type: TINYINT, nullable: false, no_default: true, enum: TargetTypeEnum,
+         api_range: "1~3（4=REPORT 仅用于 admin_operation_log，举报接口 @Max(3) 拦住）"}
+      - {name: target_id, type: "BIGINT UNSIGNED", nullable: false, desc: "多态外键，含义随 target_type 变"}
+      - {name: reason_type, type: TINYINT, nullable: false, no_default: true, enum: ReportReasonEnum}
+      - {name: reason_detail, type: "VARCHAR(255)", nullable: false, default: "''"}
+      - {name: status, type: TINYINT, nullable: false, default: 0, enum: ReportStatusEnum}
+      - {name: handler_id, type: "BIGINT UNSIGNED", nullable: true}
+      - {name: handle_remark, type: "VARCHAR(255)", nullable: false, default: "''"}
+      - {name: handle_time, type: "DATETIME(3)", nullable: true}
+      - {name: create_time, type: "DATETIME(3)", nullable: false, default: "CURRENT_TIMESTAMP(3)", fill: INSERT}
+      - {name: update_time, type: "DATETIME(3)", nullable: false, default: "CURRENT_TIMESTAMP(3) ON UPDATE", fill: INSERT_UPDATE}
+    indexes:
+      - {name: uk_reporter_target, columns: [reporter_id, target_type, target_id], unique: true,
+         on_duplicate_maps_to: ALREADY_REPORTED,
+         semantics: "**同一人对同一目标**只能举报一次；不同人可举报同一目标"}
+      - {name: idx_status_time, columns: [status, create_time], note: "create_time DESC"}
+      - {name: idx_target, columns: [target_type, target_id]}
+
+  - name: admin_operation_log
+    purpose: 管理员操作日志
+    entity: AdminOperationLog
+    base_class: BaseCreateEntity
+    soft_delete: false
+    append_only: true
+    columns:
+      - {name: id, type: "BIGINT UNSIGNED", nullable: false, default: AUTO_INCREMENT, pk: true}
+      - {name: admin_id, type: "BIGINT UNSIGNED", nullable: false}
+      - {name: operation_type, type: "VARCHAR(32)", nullable: false, examples: [DELETE_POST, DELETE_COMMENT, DISABLE_USER, ENABLE_USER, HANDLE_REPORT]}
+      - {name: target_type, type: TINYINT, nullable: false, enum: TargetTypeEnum,
+         api_range: "1~4（此处 4=REPORT 合法）"}
+      - {name: target_id, type: "BIGINT UNSIGNED", nullable: true}
+      - {name: detail, type: "VARCHAR(500)", nullable: false, default: "''",
+         security_note: "禁止写入敏感信息"}
+      - {name: ip, type: "VARCHAR(45)", nullable: false, default: "''", note: "IPv6 最长 45 字符"}
+      - {name: create_time, type: "DATETIME(3)", nullable: false, default: "CURRENT_TIMESTAMP(3)", fill: INSERT}
+    no_update_time: true
+    no_update_time_reason: "追加写，不修改"
+    indexes:
+      - {name: idx_admin_time, columns: [admin_id, create_time], note: DESC}
+      - {name: idx_type_time, columns: [operation_type, create_time]}
+
+# ═════════════════════════════════════════════
+# 二、实体继承体系（EntitySchemaConsistencyTest 守护的对象）
+# ═════════════════════════════════════════════
+entity_base_classes:
+  - name: BaseEntity
+    fields: [id, "createTime(fill=INSERT)", "updateTime(fill=INSERT_UPDATE)", "deleted(@TableLogic, select=false)"]
+    has_table_logic: true
+    used_by: [User, Post, Comment, Message, Notification]
+  - name: BaseCreateEntity
+    fields: [id, "createTime(fill=INSERT)"]
+    has_table_logic: false
+    used_by: [Follow, PostLike, PostImage, AdminOperationLog]
+  - name: BaseEntityNoDelete
+    fields: [id, "createTime(fill=INSERT)", "updateTime(fill=INSERT_UPDATE)"]
+    has_table_logic: false
+    used_by: [Conversation, Report]
+    exists_because: "为修复 Report 误继承 BaseEntity 的历史 Bug 而抽出，Javadoc 明确记录了此坑"
+
+entity_schema_consistency_test:
+  path: backend/src/test/java/com/miqu/common/EntitySchemaConsistencyTest.java
+  guards_entity_count: 11
+  check_1:
+    name: logicDeleteAnnotationMatchesColumn
+    lines: "67-85"
+    asserts: "实体继承链上有 @TableLogic ⟺ 对应表有 deleted 列"
+    prevents:
+      - "实体有 @TableLogic 但表无 deleted → SQL Unknown column"
+      - "表有 deleted 但实体无 @TableLogic → 已删除数据泄漏"
+  check_2:
+    name: everyFieldMapsToColumn
+    lines: "88-108"
+    asserts: "每个实体字段（驼峰转蛇形）都能在表元数据中找到对应列"
+    skips: ["static / transient / synthetic 字段", "@TableField(exist=false) 字段"]
+  maintenance_rule: >-
+    ⚠️ **新增实体时必须把它加入 ENTITIES 列表**（第 56 行有注释提醒）。
+    忘加 → 新实体不受守护，同类 Bug 会重现。
+    AI 若生成"新增实体"相关的测试建议，必须包含这一条。
+
+entity_schema_consistency_verified:
+  date: 2026-09-16
+  result: "11 个实体全部一致，未发现字段/列缺失或 @TableLogic 错配"
+  confidence: CONFIRMED
+
+# ═════════════════════════════════════════════
+# 三、枚举全集（AI 只能用这些取值）
+# ═════════════════════════════════════════════
+enums:
+  - name: GenderEnum
+    column: user.gender
+    source: common/enums/GenderEnum.java:11-13
+    values:
+      - {enum_name: UNKNOWN, code: 0, desc: 未知, is_default: true}
+      - {enum_name: MALE, code: 1, desc: 男}
+      - {enum_name: FEMALE, code: 2, desc: 女}
+    valid_range: "0~2（DTO @Min(0)@Max(2)）"
+    invalid_examples: [-1, 3, 99]
+
+  - name: RoleEnum
+    column: user.role
+    source: common/enums/RoleEnum.java:9-10
+    values:
+      - {enum_name: USER, code: 1, desc: 普通用户, is_default: true}
+      - {enum_name: ADMIN, code: 2, desc: 管理员}
+    valid_range: "1~2"
+    note: "**只有两个角色**。不要臆造 moderator / superadmin / guest 等不存在的角色。"
+    api_writability: "**注册与改资料均不能设置 role**（DTO 不暴露），只能由数据库种子或直接改库产生"
+
+  - name: UserStatusEnum
+    column: user.status
+    source: common/enums/UserStatusEnum.java:9-10
+    values:
+      - {enum_name: DISABLED, code: 0, desc: 已禁用}
+      - {enum_name: NORMAL, code: 1, desc: 正常, is_default: true}
+    valid_range: "0~1"
+    gate_methods:
+      requireActiveUser: "status != NORMAL → 抛 USER_DISABLED(423)"
+      requireVisibleUser: "**不检查 status**，禁用用户仍可见（用于主页浏览、管理端查看）"
+
+  - name: NotificationTypeEnum
+    column: notification.type
+    source: common/enums/NotificationTypeEnum.java:14-20
+    values:
+      - {enum_name: FOLLOW, code: 1, desc: 关注, active: true}
+      - {enum_name: LIKE, code: 2, desc: 点赞, active: true}
+      - {enum_name: COMMENT, code: 3, desc: 评论, active: true}
+      - {enum_name: MESSAGE, code: 4, desc: 私信, active: false, deprecated: true,
+         note: "@Deprecated 保留值，一期不使用；isValid() 只接受 1/2/3；DTO @Max(3) 也会拦"}
+    valid_range: "1~3（API 层）"
+    forbidden_test: "**不要生成 type=4 的通知用例**"
+
+  - name: TargetTypeEnum
+    column: "report.target_type / admin_operation_log.target_type"
+    source: common/enums/TargetTypeEnum.java:14-17
+    values:
+      - {enum_name: USER, code: 1, desc: 用户}
+      - {enum_name: POST, code: 2, desc: 动态}
+      - {enum_name: COMMENT, code: 3, desc: 评论}
+      - {enum_name: REPORT, code: 4, desc: 举报, note: "**仅 admin_operation_log 使用**"}
+    valid_range_isValid: "1~4"
+    valid_range_report_api: "1~3（CreateReportRequest @Max(3)）"
+    range_mismatch_note: >-
+      ⚠️ isValid() 接受 1~4，但举报 DTO 只允许 1~3。
+      Service 里"targetType==REPORT 则拒绝"的分支对 HTTP 请求**不可达**。见 issues.yaml C-03。
+
+  - name: ReportReasonEnum
+    column: report.reason_type
+    source: common/enums/ReportReasonEnum.java:11-15
+    values:
+      - {enum_name: SPAM, code: 1, desc: 垃圾广告}
+      - {enum_name: ABUSE, code: 2, desc: 辱骂骚扰}
+      - {enum_name: PORNOGRAPHY, code: 3, desc: 色情低俗}
+      - {enum_name: ILLEGAL, code: 4, desc: 违法违规}
+      - {enum_name: OTHER, code: 5, desc: 其他}
+    valid_range: "1~5"
+
+  - name: ReportStatusEnum
+    column: report.status
+    source: common/enums/ReportStatusEnum.java:9-11
+    values:
+      - {enum_name: PENDING, code: 0, desc: 待处理, is_default: true}
+      - {enum_name: HANDLED, code: 1, desc: 已处理}
+      - {enum_name: REJECTED, code: 2, desc: 已驳回}
+    valid_range: "0~2"
+    state_machine_ref: states/state_machines.yaml → report_status
+
+  - name: ReportActionEnum
+    column: "**不存数据库**"
+    usage: "仅作为 PUT /api/admin/reports/{id}/handle 的请求参数 action"
+    source: common/enums/ReportActionEnum.java:18-27
+    values:
+      - {enum_name: NONE, desc: 不处置, is_default: true, note: "action 为空/null 时取此值"}
+      - {enum_name: DELETE_POST, desc: 删除动态, allowed_target_type: 2}
+      - {enum_name: DELETE_COMMENT, desc: 删除评论, allowed_target_type: 3}
+      - {enum_name: DISABLE_USER, desc: 禁用用户, allowed_target_type: 1}
+    serialization: "**字符串**（不是数字），通过 name() 匹配，**大小写不敏感**"
+    invalid_value_error: {code: 400, error_code: INVALID_REPORT_ACTION, message: "不支持的处置动作"}
+
+# ═════════════════════════════════════════════
+# 四、边界值常量（AI 生成边界用例的唯一依据）
+# ═════════════════════════════════════════════
+boundary_constants:
+  source: backend/src/main/java/com/miqu/common/BizConstants.java
+  strings:
+    - {const: USERNAME_MIN, value: 4, line: 15, field: user.username, dto: RegisterRequest.username}
+    - {const: USERNAME_MAX, value: 20, line: 16, field: user.username,
+       ddl_max: 32, effective_max: 20, note: "**以 20 为准**（DTO 比 DDL 严）"}
+    - {const: PASSWORD_MIN, value: 6, line: 17}
+    - {const: PASSWORD_MAX, value: 20, line: 18, note: "存 BCrypt 哈希，VARCHAR(100) 足够"}
+    - {const: NICKNAME_MAX, value: 32, line: 19}
+    - {const: EMAIL_MAX, value: 64, line: 20}
+    - {const: BIO_MAX, value: 255, line: 21}
+    - {const: AVATAR_MAX, value: 255, line: 22}
+    - {const: POST_CONTENT_MAX, value: 1000, line: 30}
+    - {const: COMMENT_CONTENT_MAX, value: 500, line: 34}
+    - {const: MESSAGE_CONTENT_MAX, value: 1000, line: 37}
+    - {const: MESSAGE_PREVIEW_LENGTH, value: 100, line: 38, note: "conversation.last_message_preview 截断长度"}
+    - {const: NOTIFICATION_SNAPSHOT_LENGTH, value: 50, line: 42, note: "notification.content 快照截断长度"}
+    - {const: REPORT_DETAIL_MAX, value: 255, line: 45}
+    - {const: MAX_IMAGE_URL_LENGTH, value: 255, line: 55}
+    - {const: "(AdminQuery keyword)", value: 32, line: null,
+       source: "dto/query/AdminUserQuery.java 等，硬编码 @Size(max=32)，非常量"}
+  counts:
+    - {const: MAX_POST_IMAGES, value: 9, line: 31}
+    - {const: DEFAULT_PAGE, value: 1, line: 48}
+    - {const: DEFAULT_PAGE_SIZE, value: 10, line: 49}
+    - {const: MAX_PAGE_SIZE, value: 50, line: 50}
+    - {const: MAX_CHAT_PAGE_SIZE, value: 50, line: 51, note: "消息游标分页默认 size=20，上限同为 50"}
+  file:
+    - {const: MAX_IMAGE_SIZE, value: "5242880 (5*1024*1024)", line: 54, human: 5MB}
+  regex:
+    - {const: USERNAME_PATTERN, value: "^[A-Za-z][A-Za-z0-9_]*$", line: 25,
+       semantics: "必须以字母开头，只能含字母、数字、下划线"}
+    - {const: EMAIL_PATTERN, value: "^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$", line: 27,
+       note: "BizConstants 中定义，但 RegisterRequest 实际用的是 @Email 注解（Spring 内置规则），两者**不完全等价**"}
+  config:
+    - {key: "spring.servlet.multipart.max-file-size", value: 5MB, source: "application.yml:61"}
+    - {key: "spring.servlet.multipart.max-request-size", value: 20MB, source: "application.yml:62"}
+    - {key: "miqu.jwt.expire-seconds", value: 604800, source: "application.yml:104"}
+    - {key: "miqu.jwt.issuer", value: miqu, source: "application.yml:105"}
+    - {key: "miqu.upload.url-prefix", value: /uploads, source: "application.yml（MiquProperties.upload）",
+       usage: "图片/头像前缀校验时拼接为 '/uploads/'（带尾部斜杠）"}
+  schema_derived:
+    - {fact: "post.image_count TINYINT UNSIGNED，DDL 注释 0~9", source: "schema.sql:79"}
+    - {fact: "post_image.sort_order TINYINT UNSIGNED，DDL 注释 0~8", source: "schema.sql:96"}
+    - {fact: "conversation CHECK (user1_id < user2_id)", source: "schema.sql:157"}
+    - {fact: "admin_operation_log.operation_type VARCHAR(32)", source: "schema.sql:235"}
+    - {fact: "admin_operation_log.detail VARCHAR(500)", source: "schema.sql:238"}
+    - {fact: "admin_operation_log.ip VARCHAR(45)（IPv6 最大长度）", source: "schema.sql:239"}
+
+# ═════════════════════════════════════════════
+# 五、冗余计数字段（一致性断言的目标）
+# ═════════════════════════════════════════════
+redundant_counters:
+  desc: >-
+    这些字段是**冗余计数**，由 Service 层用原子 incr/decr SQL 维护。
+    它们与关系表的实际行数是**两条独立断言**——历史上出现过不一致。
+  counters:
+    - {table: user, column: following_count, truth_source: "follow 表中 follower_id = 该用户 的行数"}
+    - {table: user, column: follower_count, truth_source: "follow 表中 following_id = 该用户 的行数"}
+    - {table: user, column: post_count, truth_source: "post 表中 user_id = 该用户 且 deleted=0 的行数"}
+    - {table: post, column: like_count, truth_source: "post_like 表中 post_id = 该动态 的行数"}
+    - {table: post, column: comment_count, truth_source: "comment 表中 post_id = 该动态 且 deleted=0 的行数"}
+    - {table: post, column: image_count, truth_source: "post_image 表中 post_id = 该动态 的行数"}
+  consistency_test_pattern: >-
+    高价值断言模式（项目已有惯例，见 test_concurrency.py）：
+      并发操作后 → 断言 API 返回的计数 == 期望值 == 关系表实际行数
+    例：并发重复关注 → followerCount == 1（不是 2）
+  anti_dirty_read: >-
+    返回值用 freshXxxCount() **重新查库**取最新值，避免并发下的脏读
+    （PostServiceImpl.java:333-336、FollowServiceImpl.java:155-158）。
+  data_sql_recompute: >-
+    database/data.sql 末尾有统一重算脚本，保证种子数据的冗余计数与关系表一致。
+    → 重置数据库后计数一定是准的。

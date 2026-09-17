@@ -54,10 +54,10 @@ miqu/
 │       ├── utils/           # 时间格式化等
 │       └── views/           # 页面（auth / home / search / user / post / message /
 │                            #      notification / profile / admin）
-└── tests/                   # pytest 接口自动化（248 个用例）
+└── tests/                   # pytest 接口自动化（250 个用例）
     ├── conftest.py          # 夹具：后端探活、登录态、随机用户工厂
     ├── api/                 # 13 个用例文件，按模块拆分
-    ├── browser_regression.mjs  # 前端状态一致性回归（真实 Chrome，12 项断言）
+    ├── browser_regression.mjs  # 前端状态一致性回归（真实 Chrome，15 项断言）
     └── utils/client.py      # HTTP 封装（统一响应体解析）
 
 test_cases/                  # YAML 测试用例（设计与管理文档，不参与执行）
@@ -445,7 +445,7 @@ cd backend && mvn test
 ```bash
 # 先启动后端，然后
 pip install -r tests/requirements.txt
-cd tests && python -m pytest          # 248 个用例
+cd tests && python -m pytest          # 250 个用例
 python -m pytest -m smoke             # 只跑冒烟（43 条）
 python -m pytest -m read              # 只跑只读用例
 ```
@@ -461,7 +461,7 @@ python -m pytest -m read              # 只跑只读用例
 pytest 那套遵循两条纪律：**断言用差值不用绝对值**、**写数据只用当次新建的随机用户**。
 因此它是**幂等**的——连跑两次结果一致，中途不需要重置数据库。
 
-**248 个用例的分布：**
+**250 个用例的分布：**
 
 | 文件 | 用例数 | 覆盖 |
 |---|---|---|
@@ -474,12 +474,12 @@ pytest 那套遵循两条纪律：**断言用差值不用绝对值**、**写数�
 | `api/test_notification.py` | 16 | 关注/点赞/评论通知的产生与撤回、自操作不通知、已读状态 |
 | `api/test_search.py` | 15 | 昵称/用户名匹配、粉丝数倒序、**LIKE 通配符转义** |
 | `api/test_message_mutual_follow.py` | 14 | **互关私聊规则（发送侧）** |
-| `api/test_file.py` | 14 | **上传安全：魔数、大小、MIME、空/极小文件、可访问性** |
+| `api/test_file.py` | 16 | **上传安全：魔数、大小、MIME、空/极小文件、可访问性**；**缺失静态资源返回真 404** |
 | `api/test_comment.py` | 13 | 发表、长度与空内容、删除权限 |
 | `api/test_conversation_mutual_follow.py` | 11 | **互关私聊规则（会话侧）**、非参与者隔离 |
 | `api/test_concurrency.py` | 6 | **并发注册/关注/取关/点赞/建会话/发消息** |
 
-**另有一层浏览器回归**（`tests/browser_regression.mjs`，真实 Chrome，12 项断言）：
+**另有一层浏览器回归**（`tests/browser_regression.mjs`，真实 Chrome，15 项断言）：
 前端状态一致性问题（切 tab / 换关键词 / 切通知类型后，标签与实际数据是否同源）。
 这类缺陷 **pytest 与 JUnit 都测不到**——后端每次返回都是对的，错在前端没把请求发出去。
 跑法：起后端 8081 与前端 5173 后 `NO_PROXY=localhost,127.0.0.1 node tests/browser_regression.mjs`。
@@ -540,11 +540,11 @@ Bean Validation 对同一字段可能同时触发多条约束（空用户名会�
 | P3 | 私信（会话 + 消息）/ 通知查询与已读 / 用户搜索 | ✅ 完成 |
 | P4 | 管理后台：数据统计 / 用户 / 动态 / 评论 / 举报 / 操作日志 | ✅ 完成 |
 | P5 | 前端：Vue 3 + Vite + TS + Element Plus，含管理后台 | ✅ 完成 |
-| P6 | pytest 接口自动化（248 用例）+ 互关私聊 / 文件安全 / 并发 / 前端状态专项 | ✅ 完成 |
+| P6 | pytest 接口自动化（250 用例）+ 互关私聊 / 文件安全 / 并发 / 前端状态专项 | ✅ 完成 |
 | P7 | AI 测试用例生成（需求里的扩展目标） | ⬜ 待做 |
 
-**全部功能已实现并验证**：后端 **50** 个接口、前端 20+ 页面、两套测试共 **539** 个用例
-（JUnit 291 + pytest 248），另加前端浏览器回归 **12** 项断言，**当前 0 失败**。
+**全部功能已实现并验证**：后端 **50** 个接口、前端 20+ 页面、两套测试共 **541** 个用例
+（JUnit 291 + pytest 250），另加前端浏览器回归 **15** 项断言，**当前 0 失败**。
 最近一次执行结果见 [`docs/testing/TEST_EXECUTION_REPORT.md`](docs/testing/TEST_EXECUTION_REPORT.md)。
 2026-09-14 全链路 Bug Hunt 的结论与证据链见
 [`docs/testing/bug_report.md`](docs/testing/bug_report.md)（4 个 P2 缺陷已修，1 个证伪）。

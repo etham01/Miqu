@@ -78,6 +78,39 @@ def test_uploaded_file_is_reachable(fresh_user):
     assert "image/" in fetched.headers.get("Content-Type", "")
 
 
+@pytest.mark.read
+def test_missing_uploaded_file_returns_real_404(anonymous):
+    """BUG-007 回归：`/uploads/**` 下不存在的文件必须返回**真正的 HTTP 404**。
+
+    这条**有意偏离**项目"HTTP 恒 200，结果看 body.code"的约定
+    （约定说明见 `tests/utils/client.py` 开头）——静态资源不是业务接口。
+
+    原因：浏览器 `<img>` 与 CDN 靠**状态码**判断"取不到"。包成 200 会有两个后果：
+      1. `<img>` 拿到一段 JSON 去解码，必然失败 → 破图（本次头像问题的直接放大器）；
+      2. 缓存层把一个不存在的资源当成成功响应，语义失真。
+
+    实测（修复前）：`http=200 content-type=application/json
+    {"code":404,"message":"请求的资源不存在"}`。
+    """
+    response = anonymous.get("/uploads/image/2026/09/definitely-not-exist.png")
+
+    assert response.http_status == 404
+    assert response.code == 404
+
+
+@pytest.mark.read
+def test_unknown_api_path_keeps_http_200(anonymous):
+    """对照组：本次改动**没有动** `/api/**` 的对外契约，业务接口仍是「HTTP 恒 200」。
+
+    没有这条，上面那条 404 很容易被后人推广成"所有 404 都该返回真状态码"，
+    从而破坏前端 `request.ts` 依赖的既有约定。
+    """
+    response = anonymous.get("/api/definitely-not-exist")
+
+    assert response.http_status == 200
+    assert response.code == 404
+
+
 # ---------- 安全边界 ----------
 
 

@@ -1,0 +1,366 @@
+# Miqu 权限知识库
+#
+# 用途：回答「**谁能在什么资源上做什么事，被拒时期望哪个码**」。
+#       生成越权/认证用例的唯一依据。
+#
+# 为什么必须单独成文：
+#   本项目有**三重**独立的权限判定，它们的拒绝码互不相同，AI 极易混淆：
+#     ① 白名单 + 登录判定（AuthInterceptor）      → 401
+#     ② 角色判定（@RequireAdmin）                 → 403 FORBIDDEN
+#     ③ 资源所有者判定（Service 内）              → 403 FORBIDDEN 或 404
+#   同一个 403 可能出自 ② 也可能出自 ③，message 相同但**含义不同**，
+#   且 ③ 有时用 404 而不是 403（见 §4 的"404 vs 403 语义约定"）。
+#
+# 消费者：
+#   LLM               → 生成越权用例、选正确的测试账号
+#   Pydantic          → 校验角色/资源名是否真实存在
+#   BusinessValidator → 校验预期状态码是否符合本矩阵
+#   CoverageValidator → 统计"角色 × 端点"覆盖（本文件是权限维度的权威清单）
+#
+# 真相来源（逐行读取）：
+#   security/AuthInterceptor.java        —— 判定 ①②
+#   security/RequireAdmin.java           —— 角色注解
+#   security/JwtAuthenticationFilter.java—— 身份状态
+#   config/WebMvcConfig.java             —— 拦截器作用范围
+#   backend/src/main/resources/application.yml → miqu.auth.white-list
+#   service/impl/*.java                  —— 判定 ③
+#
+# confidence: CONFIRMED（全部实测或逐行核对）
+# verified_at: 2026-09-17
+
+meta:
+  generated_at: 2026-09-17
+  total_endpoints: 50
+  whitelist_count: 12
+  policy: "失败关闭（fail-closed）—— 不在白名单的 /api/** 一律要求登录"
+  http_status_policy: "HTTP 恒 200；下述 code 均指 body.code"
+
+# ═══════════════════════════════════════════════════════════════
+# 1. 身份状态空间（先定"谁"，再定"能不能"）
+# ═══════════════════════════════════════════════════════════════
+identity_states:
+  desc: >-
+    本项目**只有 2 个角色**（RoleEnum），但有 7 种身份状态。
+    生成认证用例时，"未登录"只是其中一种，另外 6 种更容易被漏测。
+  # ⚠️ 本项目**不存在**的常见角色 —— AI 不要创造
+  does_not_exist:
+    - "moderator / 版主"
+    - "super_admin / 超级管理员"
+    - "guest 账号（游客就是「没有 Token」，不是一个账号）"
+    - "vip / 付费用户"
+    - "被禁言用户（只有「禁用」整账号，没有单独禁言）"
+  states:
+    - id: ID-ANON
+      name: 未登录 / 游客
+      how_to_construct: "不设 Authorization 头"
+      can_access: "仅白名单 12 个端点"
+      blocked_code: 401
+      blocked_error_code: UNAUTHORIZED
+      rules_covered: []
+
+    - id: ID-USER
+      name: 已登录普通用户（role=1）
+      how_to_construct: "种子 test001 / test002，或 fresh_user 夹具"
+      can_access: "除管理后台外的全部端点（受资源所有者规则约束）"
+      rules_covered: []
+
+    - id: ID-ADMIN
+      name: 管理员（role=2）
+      how_to_construct: "种子 admin（id=1）"
+      can_access: "全部端点"
+      critical: "🔴 全库**只有 1 个管理员**。这直接造成 USER-013 / SEC-004 不可达（见 §6）"
+      rules_covered: []
+
+    - id: ID-DISABLED
+      name: 已禁用账号（status=0）
+      how_to_construct: "种子 banned001(id=12)；或 fresh_user 后用 admin 禁用（**必须在 finally 里解禁**）"
+      behavior:
+        - "POST /api/auth/login → 423 USER_DISABLED"
+        - "**携带其旧 Token 访问受保护端点 → 423**（每请求查库，无需等 Token 过期）"
+        - "**携带其旧 Token 访问白名单端点 → 200**（按游客放行，坏 Token 被静默忽略）"
+        - "其主页**仍可访问**（requireVisibleUser 不过滤 status，USER-011）"
+      rules_covered: [AUTH-004, SEC-002, USER-010, USER-011]
+      verified: "validation_order_probe P4/P5/P6"
+
+    - id: ID-DELETED
+      name: 已注销账号（deleted=1）
+      how_to_construct: "种子 deleted001(id=13)；**无删除接口**，只能改库（UPDATE user SET deleted=1）"
+      behavior:
+        - "POST /api/auth/login → 401 INVALID_CREDENTIALS（selectOne 被 @TableLogic 过滤）"
+        - "携带其旧 Token 访问受保护端点 → **401**（不是 404！见 validation_order.yaml AS-01）"
+        - "携带其旧 Token 访问白名单端点 → 200"
+        - "其主页 / 关注 / 私信等以它为**目标**的操作 → 404 USER_NOT_FOUND"
+      rules_covered: [AUTH-006, SEC-003]
+      verified: "auth_layer_probe A1/A2/A3/A4/A5/A6"
+
+    - id: ID-BAD-TOKEN
+      name: 非法/篡改 Token
+      how_to_construct: "把合法 Token 的最后一位改掉；或使用任意字符串"
+      blocked_code: 401
+      note: "白名单端点上同样被静默忽略 → 200"
+
+    - id: ID-NO-PREFIX
+      name: 缺少 Bearer 前缀
+      how_to_construct: 'Authorization: <token>（不带 "Bearer "）'
+      blocked_code: 401
+      reason: "JwtAuthenticationFilter.resolveToken 要求以 'Bearer ' 开头，否则视为无 Token"
+
+# ═══════════════════════════════════════════════════════════════
+# 2. 白名单（免登录端点全集）
+# ═══════════════════════════════════════════════════════════════
+whitelist:
+  source: "backend/src/main/resources/application.yml → miqu.auth.white-list"
+  matcher: "AntPathMatcher；格式 METHODS:/ant/path，METHODS 可省略表示任意方法"
+  count: 12
+  entries:
+    - {entry: "POST:/api/auth/register", why: "注册本身不需要登录"}
+    - {entry: "POST:/api/auth/login", why: "登录本身不需要登录"}
+    - {entry: "GET:/api/health", why: "探活；pytest 的 ensure_backend_running 用它"}
+    - {entry: "GET:/api/posts", why: "游客可浏览动态列表（两种 tab 都在此）"}
+    - {entry: "GET:/api/posts/{id:[0-9]+}", why: "游客可看动态详情"}
+    - {entry: "GET:/api/posts/{id:[0-9]+}/likes", why: "游客可看点赞列表"}
+    - {entry: "GET:/api/posts/{id:[0-9]+}/comments", why: "游客可看评论列表"}
+    - {entry: "GET:/api/users/search", why: "游客可搜索用户"}
+    - {entry: "GET:/api/users/{id:[0-9]+}", why: "游客可看用户主页"}
+    - {entry: "GET:/api/users/{id:[0-9]+}/posts", why: "游客可看某用户的动态"}
+    - {entry: "GET:/api/users/{id:[0-9]+}/following", why: "游客可看关注列表"}
+    - {entry: "GET:/api/users/{id:[0-9]+}/followers", why: "游客可看粉丝列表"}
+
+  critical_design_points:
+    - id: WL-01
+      point: "用户主页路径用的是 `{id:[0-9]+}` 而**不是 `**`**"
+      why: >-
+        若写成 `GET:/api/users/**`，则 `/api/users/me` 会被一并放行，
+        个人中心变成免登录可访问。用数字 ID 正则把它排除在外。
+      test_use: >-
+        可生成对照用例：`GET /api/users/me`（未登录）→ **401**，
+        而 `GET /api/users/2`（未登录）→ **200**（SEC-006 / test_me_path_is_not_whitelisted）
+      existing_cases: [SEC-006]
+
+    - id: WL-02
+      point: "`/api/files/**` **有意不排除**，上传接口要求登录"
+      why: "否则任何人都能往服务器写文件"
+      test_use: "未登录上传 → 401（test_upload_requires_login）"
+
+    - id: WL-03
+      point: "白名单命中时，**坏 Token / 禁用 Token / 已删除 Token 都被静默忽略**"
+      why: "游客浏览动态不应因为本地残留的过期 Token 而报错（AuthInterceptor.java:58-62 的注释）"
+      ai_impact: "🔴 不要生成「白名单端点 + 坏 Token → 401」的用例，实际是 200"
+
+  assert_algorithm: |
+    # AI 判断"某端点未登录时期望什么"的算法：
+    if method_and_path matches one of whitelist.entries:
+        expected = 200          # 且坏 Token 也是 200
+    elif requires_admin:
+        expected = 401          # 且坏 Token 也是 200
+    else:
+        expected = 401          # 带着坏/禁用 Token 时改为 401 / 423
+
+# ═══════════════════════════════════════════════════════════════
+# 3. 角色 × 端点：管理后台访问控制矩阵
+# ═══════════════════════════════════════════════════════════════
+admin_endpoints:
+  annotation: "@RequireAdmin（类级，标注在 6 个 Admin*Controller 上）"
+  source: "AdminUserController / AdminPostController / AdminCommentController / AdminReportController / AdminStatsController / AdminLogController"
+  evaluation_order:
+    - "1. currentUser == null → 401（或透传 authError → 423）"
+    - "2. !currentUser.isAdmin() → 403 FORBIDDEN"
+    - "3. 放行到 Controller，再做 Bean Validation 与业务校验"
+  matrix:
+    desc: "11 个后台端点 × 3 种身份。**这是本项目唯一成体系的访问控制矩阵**。"
+    columns: [endpoint, method, path, ID_ANON, ID_USER, ID_ADMIN]
+    rows:
+      - {endpoint: GET_ADMIN_STATS, method: GET, path: "/api/admin/stats", ID_ANON: 401, ID_USER: 403, ID_ADMIN: 200}
+      - {endpoint: GET_ADMIN_USERS, method: GET, path: "/api/admin/users", ID_ANON: 401, ID_USER: 403, ID_ADMIN: 200}
+      - {endpoint: GET_ADMIN_USERS_ID, method: GET, path: "/api/admin/users/{id}", ID_ANON: 401, ID_USER: 403, ID_ADMIN: 200}
+      - {endpoint: PUT_ADMIN_USERS_ID_STATUS, method: PUT, path: "/api/admin/users/{id}/status", ID_ANON: 401, ID_USER: 403, ID_ADMIN: "200 / 400（见 §6）"}
+      - {endpoint: GET_ADMIN_POSTS, method: GET, path: "/api/admin/posts", ID_ANON: 401, ID_USER: 403, ID_ADMIN: 200}
+      - {endpoint: DELETE_ADMIN_POSTS_ID, method: DELETE, path: "/api/admin/posts/{id}", ID_ANON: 401, ID_USER: 403, ID_ADMIN: 200}
+      - {endpoint: GET_ADMIN_COMMENTS, method: GET, path: "/api/admin/comments", ID_ANON: 401, ID_USER: 403, ID_ADMIN: 200}
+      - {endpoint: DELETE_ADMIN_COMMENTS_ID, method: DELETE, path: "/api/admin/comments/{id}", ID_ANON: 401, ID_USER: 403, ID_ADMIN: 200}
+      - {endpoint: GET_ADMIN_REPORTS, method: GET, path: "/api/admin/reports", ID_ANON: 401, ID_USER: 403, ID_ADMIN: 200}
+      - {endpoint: PUT_ADMIN_REPORTS_ID_HANDLE, method: PUT, path: "/api/admin/reports/{id}/handle", ID_ANON: 401, ID_USER: 403, ID_ADMIN: "200 / 409（见 §6）"}
+      - {endpoint: GET_ADMIN_LOGS, method: GET, path: "/api/admin/logs", ID_ANON: 401, ID_USER: 403, ID_ADMIN: 200}
+  existing_coverage:
+    pytest: "test_admin.py 的 ADMIN_ENDPOINTS 常量只含 **7 个 GET** 接口 × 3 种身份 = 21 个用例"
+    gap: >-
+      ⚠️ 4 个**写**接口（PUT users/{id}/status、DELETE posts/{id}、DELETE comments/{id}、
+      PUT reports/{id}/handle）**不在**矩阵式 401/403 覆盖里，
+      它们只在各自业务用例里做了权限断言。
+    ai_opportunity: >-
+      ✅ 这是本知识库里**明确可补的覆盖增量**：为这 4 个写接口补"未登录 401 / 非管理员 403"。
+      docs/api/README.md §11.3 也把这一条登记为待补项。
+
+# ═══════════════════════════════════════════════════════════════
+# 4. 资源所有者规则（第三重判定）
+# ═══════════════════════════════════════════════════════════════
+ownership_rules:
+  desc: >-
+    已登录用户之间的越权：**能不能操作"别人的"资源**。
+    实现位置在 Service 层，靠比较资源行的 user_id 与 currentUserId。
+  semantics_convention:
+    rule: 存在但无权 → 403；不存在或不可见 → 404
+    why: >-
+      NotificationServiceImpl.java:149-153 的注释明确写了这个约定：
+      "别人的通知返回 403 而不是 404：通知本身存在，只是无权操作。两者区分开，测试才能分别断言"。
+      → 生成用例时应**成对**生成（一个 403、一个 404），不要合并成一个断言。
+  matrix:
+    - resource: post
+      action: delete
+      endpoint: DELETE_POSTS_ID
+      owner_rule: "post.user_id == currentUserId || currentUser.isAdmin()"
+      denied_code: 403
+      denied_error_code: FORBIDDEN
+      denied_message: 无权限执行该操作
+      not_found: "post 不存在或已逻辑删除 → 404 POST_NOT_FOUND"
+      note: "404 判定**先于** 403（先查 post 再判所有者）→ 对不存在的 post 越权删除返回 404 而非 403"
+      rules: [POST-005, POST-006, SEC-009]
+      existing_cases: [SEC-009]
+
+    - resource: comment
+      action: delete
+      endpoint: DELETE_COMMENTS_ID
+      owner_rule: "comment.user_id == currentUserId || currentUser.isAdmin()"
+      denied_code: 403
+      denied_error_code: FORBIDDEN
+      not_found: "404 COMMENT_NOT_FOUND"
+      rules: [CMT-002, CMT-003]
+      existing_cases: [CMT-002, CMT-003, SEC-010]
+
+    - resource: notification
+      action: mark_read
+      endpoint: PUT_NOTIFICATIONS_ID_READ
+      owner_rule: "notification.user_id == currentUserId"
+      denied_code: 403
+      denied_error_code: FORBIDDEN
+      not_found: "404 NOTIFICATION_NOT_FOUND"
+      note: "**管理员也不能操作他人通知**（该端点无 @RequireAdmin，且校验只看 user_id）"
+      rules: [NOTI-001]
+      existing_cases: [SEC-008]
+
+    - resource: conversation
+      action: read_messages / mark_read
+      endpoints: [GET_CONVERSATIONS_ID_MESSAGES, PUT_CONVERSATIONS_ID_READ]
+      owner_rule: "conversation.user1_id == currentUserId || conversation.user2_id == currentUserId"
+      denied_code: 403
+      denied_error_code: NOT_CONVERSATION_MEMBER
+      denied_message: 你不是该会话的参与者
+      not_found: "404 CONVERSATION_NOT_FOUND"
+      note: "拒绝码是 NOT_CONVERSATION_MEMBER 而**不是**通用 FORBIDDEN —— 断言 message 时要用这一条"
+      rules: [CONV-012]
+      existing_cases: [CONV-012]
+
+    - resource: follow
+      action: unfollow
+      endpoint: DELETE_USERS_ID_FOLLOW
+      owner_rule: "操作对象恒定是 (currentUserId → {id})，**无法取消别人的关注**"
+      denied_code: "n/a"
+      behavior: "没关注过 → 404 NOT_FOLLOWED；目标不存在 → 404 USER_NOT_FOUND"
+      note: "✅ 这个端点**没有越权面**：删除条件里 follower_id 恒为 currentUserId。不要生成越权用例。"
+      rules: [FOL-002, FOL-003]
+
+    - resource: user
+      action: update_status
+      endpoint: PUT_ADMIN_USERS_ID_STATUS
+      owner_rule: "仅管理员；且 targetUserId != adminId；且目标不是管理员"
+      denied_code: 400 / 403
+      order: "CANNOT_OPERATE_SELF(400) → USER_NOT_FOUND(404) → CANNOT_DISABLE_ADMIN(403)"
+      rules: [USER-012, USER-013, USER-014]
+      existing_cases: [SEC-003, SEC-004]
+
+    - resource: user_profile
+      action: update
+      endpoint: PUT_USERS_ME
+      owner_rule: "**只能改自己** —— 端点路径里根本没有 userId"
+      note: >-
+        设计上消除了越权面。可生成"批量赋值防护"用例：
+        请求体额外带 username/email/role/status 会被静默忽略（SER-06），
+        响应中的 username 与改前一致（USER-001）。
+      rules: [USER-001]
+
+# ═══════════════════════════════════════════════════════════════
+# 5. 私聊的特殊权限门槛（互关）
+# ═══════════════════════════════════════════════════════════════
+mutual_follow_gate:
+  desc: >-
+    私信/会话比"已登录"多一道门槛：**必须互相关注**。
+    这是 2026-09-11 冻结的规则，也是本项目最特殊的一条权限设计。
+  frozen_at: 2026-09-11
+  applies_to:
+    - {endpoint: POST_MESSAGES, action: 发送私信, denied_code: 403, error_code: NOT_MUTUAL_FOLLOW}
+    - {endpoint: POST_CONVERSATIONS, action: 打开/创建会话, denied_code: 403, error_code: NOT_MUTUAL_FOLLOW}
+  does_not_apply_to:
+    - {endpoint: GET_CONVERSATIONS_ID_MESSAGES, reason: "读历史消息由 requireMember 判定，**不受互关限制**"}
+    - {endpoint: PUT_CONVERSATIONS_ID_READ, reason: "标记已读同理不受限"}
+    - {endpoint: GET_CONVERSATIONS, reason: "会话列表不校验互关"}
+    - {endpoint: GET_MESSAGES_UNREAD_COUNT, reason: "未读总数不校验互关"}
+  design_intent: "限制的是「**发起**」，不是「查看」—— 解除互关后历史消息仍然可读（test_history_stays_readable_after_unfollow）"
+  denial_state_matrix:
+    desc: "四种关注组合，只有第一种可发消息"
+    rows:
+      - {A_to_B: true, B_to_A: true, allowed: true, code: 200, note: "互关 —— 唯一允许的组合"}
+      - {A_to_B: false, B_to_A: false, allowed: false, code: 403, note: "陌生人"}
+      - {A_to_B: true, B_to_A: false, allowed: false, code: 403, note: "单向关注（发送方关注了接收方）"}
+      - {A_to_B: false, B_to_A: true, allowed: false, code: 403, note: "单向关注（接收方关注了发送方）"}
+  no_trace_requirement: >-
+    🔴 被拒的发送**不产生任何痕迹**：不建会话、不写消息、不加未读。
+    原因：互关校验在写库之前（MessageServiceImpl.java:53-58 的注释）。
+    用例：test_blocked_send_leaves_no_trace（三条断言：会话数/消息数/未读数）
+  rules: [MSG-011, MSG-013, MSG-014, CONV-009, CONV-011]
+  existing_cases: [MSG-001, MSG-002, MSG-003, MSG-011, MSG-013, MSG-014, CONV-001, CONV-009, CONV-011]
+
+  self_and_target_checks:
+    desc: "互关校验之前还有三道（顺序固定，不要搞反）"
+    order:
+      - {step: 1, check: "DTO Bean Validation（receiverId @NotNull、content @NotBlank/@Size≤1000）", code: 400}
+      - {step: 2, check: "receiverId == currentUserId", code: 400, error_code: CANNOT_MESSAGE_SELF}
+      - {step: 3, check: "requireActiveUser(receiverId) —— 不存在 404 / 禁用 423", code: 404}
+      - {step: 4, check: "!isMutual()", code: 403, error_code: NOT_MUTUAL_FOLLOW}
+    cross_ref: rules/validation_order.yaml → stacked_violation_winners
+
+# ═══════════════════════════════════════════════════════════════
+# 6. 已知权限缺口（不隐藏）
+# ═══════════════════════════════════════════════════════════════
+known_gaps:
+  - id: PG-01
+    gap: "「不能禁用另一个管理员」(CANNOT_DISABLE_ADMIN / 403) 在 HTTP 层不可达"
+    cause: "种子只有 1 个管理员；管理员禁用自己时 CANNOT_OPERATE_SELF(400) 先命中"
+    registered: "SEC-004（status: gap）"
+    cross_ref: issues.yaml M-01
+    to_cover: "补第二个管理员种子账号；或用直接调 Service / 直接改库的集成测试"
+    ai_instruction: "🔴 **不要生成**这个用例 —— 它必然拿不到 403"
+
+  - id: PG-02
+    gap: "管理后台 4 个写接口没有矩阵式的『未登录 401 / 非管理员 403』覆盖"
+    cause: "test_admin.py 的 ADMIN_ENDPOINTS 只含 7 个 GET"
+    registered: docs/api/README.md §11.3
+    to_cover: "补 4 × 2 = 8 个用例"
+    ai_instruction: "✅ 这是**推荐生成**的增量覆盖（权限维度上唯一的大块空白）"
+
+  - id: PG-03
+    gap: "前端无路由级权限测试"
+    cause: "前端没有单元/组件测试框架；browser_regression.mjs 只覆盖状态一致性"
+    ai_instruction: "不要设计「未登录用户打开 /admin 页面应被拦截」的接口用例 —— 那是前端行为，且当前无测试手段"
+
+  - id: PG-04
+    gap: "`@RequireAdmin` 只标注在类上，没有方法级的例外"
+    fact: "CONFIRMED：6 个 Admin*Controller 的**全部**方法都受 @RequireAdmin 约束"
+    ai_instruction: "不要假设某个后台端点「只读所以允许普通用户访问」 —— 全部要管理员"
+
+  - id: PG-05
+    gap: "无法撤销已签发的 Token（除禁用/注销账号外）"
+    cause: "JWT 无状态、logout 不失效、改密码不失效、无 token_version"
+    impact: "所有「Token 应失效」类用例只有两条合法路径：禁用账号、逻辑删除账号"
+    ai_instruction: "🔴 不要生成『logout 后旧 Token 应 401』『改密码后旧 Token 应 401』的用例"
+
+# ═══════════════════════════════════════════════════════════════
+# 7. AI 生成越权用例的检查点
+# ═══════════════════════════════════════════════════════════════
+ai_checklist:
+  - "先查 §1 identity_states：确认要构造哪种身份。『未登录』只是 7 种之一"
+  - "再查 §2 assert_algorithm：白名单端点未登录是 200，不是 401"
+  - "管理后台用例查 §3 矩阵：期望 401/403/200 是定死的"
+  - "操作他人资源查 §4：区分 403（存在但无权）与 404（不存在）"
+  - "私信/会话用例查 §5：先确认互关状态，非互关是 403 NOT_MUTUAL_FOLLOW"
+  - "生成前扫一遍 §6：不要为已知缺口生成必然失败的用例"
+  - "**不要创造角色**：本项目只有 USER(1) / ADMIN(2) 两个角色"

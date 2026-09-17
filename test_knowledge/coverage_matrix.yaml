@@ -1,0 +1,418 @@
+# 覆盖矩阵（Coverage Matrix）
+#
+# 用途：回答「**哪些东西被覆盖、哪些没有**」，并且**按维度**回答 ——
+#       Feature / API / Rule / Parameter / Role / State / Workflow / Category。
+#
+# 为什么它必须可被程序消费：
+#   覆盖判定不能靠人读文档。CoverageValidator 应该能直接读本文件，
+#   算出"这个 requirement 生成的用例覆盖了几条规则、还差哪些"。
+#
+# 与 test_policy.yaml 的分工：
+#   test_policy.yaml     → 决定**生成哪些类别**
+#   coverage_matrix.yaml → 判定**覆盖是否达标**（本文件是唯一度量来源）
+#
+# 消费者：CoverageValidator（主数据源）｜LLM（找空白，决定优先补什么）｜执行器（不必读）
+#
+# 真相来源：
+#   api/endpoints.yaml（50 端点）｜rules/business_rules.yaml（规则）｜
+#   existing_tests.yaml（现有覆盖）｜test_cases/*.yaml（登记状态）｜
+#   permissions/permission_matrix.yaml｜states/state_machines.yaml｜workflows/workflows.yaml
+#
+# confidence: CONFIRMED
+# verified_at: 2026-09-17
+
+meta:
+  generated_at: 2026-09-17
+  chain: "Feature → API → Business Rule → Test Scenario → Test Case → Automated Test"
+  levels: [feature, api, rule, scenario, case, automation]
+  baseline:
+    endpoints: 50
+    rule_ids_mentioned: 92
+    junit_cases: 291
+    pytest_cases: 250
+    browser_assertions: 15
+    yaml_registered: 100
+  coverage_convention: >-
+    覆盖状态只有四档，**不允许模糊表述**：
+      covered   = 有自动化断言，且指得出具体用例名
+      partial   = 只覆盖了该规则的部分分支（写明缺哪一支）
+      gap       = 无自动化覆盖，已登记（写明原因）
+      unreachable = 代码存在但 HTTP 层不可触达（不是"没测"，是"测不了"）
+
+# ═══════════════════════════════════════════════════════════════
+# 1. FEATURE 层（16 个功能域）
+# ═══════════════════════════════════════════════════════════════
+features:
+  - id: F-AUTH
+    name: 认证
+    apis: [POST_AUTH_REGISTER, POST_AUTH_LOGIN, POST_AUTH_LOGOUT]
+    rule_domains: [AUTH]
+    pytest: {file: api/test_auth.py, cases: 19}
+    junit: {classes: [auth/AuthControllerTest], cases: 19}
+    coverage: covered
+    notes: "AUTH 域在 test_cases/*.yaml 层**完全未登记**（YAML 层为空），但代码层覆盖充分"
+
+  - id: F-USER
+    name: 用户与资料
+    apis: [GET_USERS_ME, PUT_USERS_ME, PUT_USERS_ME_PASSWORD, PUT_USERS_ME_AVATAR, GET_USERS_ID, GET_USERS_ID_POSTS]
+    rule_domains: [USER]
+    pytest: {file: api/test_user.py, cases: 20}
+    junit: {classes: [user/UserControllerTest], cases: 20}
+    coverage: covered
+
+  - id: F-SEARCH
+    name: 搜索
+    apis: [GET_USERS_SEARCH]
+    rule_domains: [SRCH]
+    pytest: {file: api/test_search.py, cases: 15}
+    junit: {classes: [user/UserSearchTest], cases: 16}
+    coverage: partial
+    gap_detail: "SRCH 域在 business_rules.yaml 与 test_cases 里**都没有规则条目**；两个测试文件覆盖了行为，但没有可引用的结构化规则 ID。本知识库因此未给 SRCH 建规则，生成搜索用例时只能用 api/endpoints.yaml 的 GET_USERS_SEARCH 段。见 issues.yaml M-05"
+
+  - id: F-FOLLOW
+    name: 关注
+    apis: [POST_USERS_ID_FOLLOW, DELETE_USERS_ID_FOLLOW, GET_USERS_ME_FOLLOWING, GET_USERS_ME_FOLLOWERS,
+           GET_USERS_ID_FOLLOWING, GET_USERS_ID_FOLLOWERS]
+    rule_domains: [FOL]
+    pytest: {file: api/test_follow.py, cases: 19}
+    junit: {classes: [follow/FollowControllerTest], cases: 26}
+    coverage: covered
+
+  - id: F-POST
+    name: 动态
+    apis: [POST_POSTS, GET_POSTS, GET_POSTS_ID, DELETE_POSTS_ID]
+    rule_domains: [POST]
+    pytest: {file: api/test_post.py, cases: 31}
+    junit: {classes: [post/PostControllerTest], cases: 31}
+    coverage: covered
+
+  - id: F-LIKE
+    name: 点赞
+    apis: [POST_POSTS_ID_LIKE, DELETE_POSTS_ID_LIKE, GET_POSTS_ID_LIKES]
+    rule_domains: [LIKE]
+    pytest: {file: api/test_post.py, cases: "含在 31 内"}
+    junit: {classes: [post/PostLikeControllerTest], cases: 12}
+    coverage: partial
+    gap_detail: "GET_POSTS_ID_LIKES **从未被 pytest 调用**（有 JUnit 覆盖）—— 见 issues.yaml M-06"
+
+  - id: F-COMMENT
+    name: 评论
+    apis: [POST_POSTS_ID_COMMENTS, GET_POSTS_ID_COMMENTS, DELETE_COMMENTS_ID]
+    rule_domains: [CMT]
+    pytest: {file: api/test_comment.py, cases: 13}
+    junit: {classes: [comment/CommentControllerTest], cases: 20}
+    coverage: covered
+    notes: "CMT 域在 test_cases/*.yaml 层未登记（仅 SEC-010 覆盖了「不能删他人评论」）"
+
+  - id: F-CONV
+    name: 会话
+    apis: [GET_CONVERSATIONS, POST_CONVERSATIONS, GET_CONVERSATIONS_ID_MESSAGES, PUT_CONVERSATIONS_ID_READ]
+    rule_domains: [CONV]
+    pytest: {files: [api/test_conversation_mutual_follow.py, api/test_message.py], cases: "11 + 17"}
+    junit: {classes: [message/ConversationControllerTest], cases: 22}
+    coverage: covered
+    notes: "**冻结规则域**，专项 25 条（发送侧 14 + 会话侧 11）"
+
+  - id: F-MSG
+    name: 私信
+    apis: [POST_MESSAGES, GET_MESSAGES_UNREAD_COUNT]
+    rule_domains: [MSG]
+    pytest: {files: [api/test_message_mutual_follow.py, api/test_message.py], cases: "14 + 17"}
+    junit: {classes: [message/MessageControllerTest], cases: 17}
+    coverage: covered
+
+  - id: F-NOTI
+    name: 通知
+    apis: [GET_NOTIFICATIONS, GET_NOTIFICATIONS_UNREAD_COUNT, PUT_NOTIFICATIONS_ID_READ, PUT_NOTIFICATIONS_READ_ALL]
+    rule_domains: [NOTI]
+    pytest: {file: api/test_notification.py, cases: 16}
+    junit: {classes: [notification/NotificationControllerTest], cases: 19}
+    coverage: covered
+
+  - id: F-REPORT
+    name: 举报提交
+    apis: [POST_REPORTS]
+    rule_domains: [RPT]
+    pytest: {file: api/test_admin.py, cases: "仅间接（当前置数据）"}
+    junit: {classes: [report/ReportControllerTest], cases: 13}
+    coverage: partial
+    gap_detail: "用户侧异常契约（CANNOT_REPORT_SELF / ALREADY_REPORTED / 目标不存在）未被 pytest 断言 —— 见 issues.yaml M-06"
+
+  - id: F-REPORT-HANDLE
+    name: 举报处置
+    apis: [PUT_ADMIN_REPORTS_ID_HANDLE, GET_ADMIN_REPORTS]
+    rule_domains: [RPT]
+    pytest: {file: api/test_admin.py, cases: "含在 53 内"}
+    junit: {classes: [admin/AdminReportControllerTest], cases: 18}
+    coverage: covered
+
+  - id: F-FILE
+    name: 文件上传
+    apis: [POST_FILES_IMAGE]
+    rule_domains: [FILE]
+    pytest: {file: api/test_file.py, cases: 16}
+    junit: {classes: [], cases: 0}
+    coverage: covered
+    notes: "**唯一没有 JUnit 覆盖的域**；上传是 I/O 场景，pytest 更合适。含 BUG-007 的真 404 回归 2 条"
+
+  - id: F-SYS
+    name: 健康检查
+    apis: [GET_HEALTH]
+    rule_domains: []
+    pytest: {file: "conftest.ensure_backend_running（仅探活，无结构断言）"}
+    junit: {classes: [controller/HealthControllerTest], cases: 4}
+    coverage: partial
+    gap_detail: "pytest 未对 /api/health 做结构断言 —— 见 issues.yaml M-06"
+
+  - id: F-ADMIN
+    name: 管理后台
+    apis: [GET_ADMIN_STATS, GET_ADMIN_USERS, GET_ADMIN_USERS_ID, PUT_ADMIN_USERS_ID_STATUS, GET_ADMIN_POSTS,
+           DELETE_ADMIN_POSTS_ID, GET_ADMIN_COMMENTS, DELETE_ADMIN_COMMENTS_ID, GET_ADMIN_REPORTS,
+           PUT_ADMIN_REPORTS_ID_HANDLE, GET_ADMIN_LOGS]
+    rule_domains: [SEC]
+    pytest: {file: api/test_admin.py, cases: 53}
+    junit: {classes: [admin/AdminAccessControlTest, admin/AdminUserControllerTest, admin/AdminContentControllerTest,
+                      admin/AdminReportControllerTest, admin/AdminStatsControllerTest], cases: "4 + 14 + 13 + 18 + 9"}
+    coverage: partial
+    gap_detail: "访问控制矩阵只覆盖 7 个 GET × 3 身份；**4 个写接口缺「未登录 401 / 非管理员 403」** —— 见 issues.yaml M-07"
+
+  - id: F-FRONTEND
+    name: 前端状态一致性
+    apis: []
+    rule_domains: []
+    browser: {file: tests/browser_regression.mjs, assertions: 15, groups: [BUG-001, BUG-002, BUG-003, BUG-004, BUG-006]}
+    pytest: {cases: 0}
+    junit: {cases: 0}
+    coverage: covered
+    notes: "**只能由浏览器层覆盖**，见 execution/browser_contract.yaml 的 decision_rule"
+
+# ═══════════════════════════════════════════════════════════════
+# 2. API 层（50 端点）
+# ═══════════════════════════════════════════════════════════════
+api_layer:
+  total: 50
+  fully_covered: 50
+  coverage_definition: >-
+    ⚠️ **50 个端点全部有自动化覆盖**（pytest 和/或 JUnit），
+    这一点与旧文档的"38 个接口"口径不同 —— 已按实测更正。
+  pytest_scope:
+    direct: 45
+    indirect: 1
+    not_covered: 4
+  pytest_gaps: [GET_HEALTH, GET_POSTS_ID_LIKES, GET_USERS_ID_FOLLOWING, GET_USERS_ID_FOLLOWERS]
+  per_module:
+    - {module: auth, endpoints: 3, pytest: direct, junit: 19}
+    - {module: user, endpoints: 13, pytest: direct, junit: "20 + 26 + 16"}
+    - {module: post, endpoints: 7, pytest: direct, junit: "31 + 12"}
+    - {module: comment, endpoints: 3, pytest: direct, junit: 20}
+    - {module: conversation, endpoints: 4, pytest: direct, junit: 22}
+    - {module: message, endpoints: 2, pytest: direct, junit: 17}
+    - {module: notification, endpoints: 4, pytest: direct, junit: 19}
+    - {module: report, endpoints: 1, pytest: indirect, junit: 13}
+    - {module: file, endpoints: 1, pytest: direct, junit: 0}
+    - {module: system, endpoints: 1, pytest: "仅探活", junit: 4}
+    - {module: admin, endpoints: 11, pytest: direct, junit: "4 + 14 + 13 + 18 + 9"}
+  per_endpoint_source: "逐个端点的覆盖明细见 api/endpoints.yaml 各端点的 existing_cases 字段"
+
+# ═══════════════════════════════════════════════════════════════
+# 3. RULE 层（规则域 × 覆盖状态）
+# ═══════════════════════════════════════════════════════════════
+rule_layer:
+  desc: >-
+    按**域**给出覆盖状态。逐条规则的 existing_cases 指针见 rules/business_rules.yaml，
+    本表不复制细粒度指针。
+  count_reference: "rules/business_rules.yaml → meta.count_breakdown（正文 86 个 + index 段 6 个 = 92）"
+  domains:
+    - {domain: AUTH, rules: 8, yaml_registered: false, automated: covered,
+       covered_by: "api/test_auth.py(19) + AuthControllerTest(19)", note: "YAML 层为空，本知识库首次结构化"}
+    - {domain: USER, rules: 14, yaml_registered: false, automated: covered,
+       covered_by: "api/test_user.py(20) + UserControllerTest(20)", note: "YAML 层为空"}
+    - {domain: POST, rules: 7, yaml_registered: false, automated: covered,
+       covered_by: "api/test_post.py(31) + PostControllerTest(31)", note: "YAML 层为空"}
+    - {domain: LIKE, rules: 4, yaml_registered: true, automated: covered,
+       covered_by: "test_cases LIKE-001..004 + PostLikeControllerTest(12)"}
+    - {domain: CMT, rules: 7, yaml_registered: false, automated: covered,
+       covered_by: "api/test_comment.py(13) + CommentControllerTest(20)", note: "YAML 层仅 SEC-010 间接覆盖"}
+    - {domain: NOTI, rules: 8, yaml_registered: false, automated: covered,
+       covered_by: "api/test_notification.py(16) + NotificationControllerTest(19)", note: "YAML 层为空"}
+    - {domain: FOL, rules: 8, yaml_registered: true, automated: covered,
+       covered_by: "test_cases FOL-001..006 + FOL-007/008（本知识库新增）"}
+    - {domain: CONV, rules: 15, yaml_registered: true, automated: covered,
+       covered_by: "test_cases CONV-001..015"}
+    - {domain: MSG, rules: 17, yaml_registered: true, automated: covered,
+       covered_by: "test_cases MSG-001..017 + MSGFACT-01..08（事实条目）"}
+    - {domain: RPT, rules: 10, yaml_registered: false, automated: covered,
+       covered_by: "business_rules.yaml RPT-001..010 + api/test_admin.py + ReportControllerTest(13)",
+       note: "**RPT 前缀尚未被 check_consistency.py 的 VALID_PREFIXES 接受**，故不能写入 test_cases/ —— 见 issues.yaml C-05"}
+    - {domain: FILE, rules: 15, yaml_registered: true, automated: covered,
+       covered_by: "test_cases FILE-001..012 + FILE-013/014/015（本知识库新增）"}
+    - {domain: SEC, rules: 12, yaml_registered: true, automated: partial,
+       covered_by: "test_cases SEC-001..012", gap_detail: "SEC-004 为 gap（HTTP 层不可达）"}
+    - {domain: CONC, rules: 12, yaml_registered: true, automated: partial,
+       covered_by: "test_cases CONC-001..012", gap_detail: "CONC-007 为 gap（数十线程压测，未做）"}
+    - {domain: SMK, rules: 27, yaml_registered: true, automated: covered,
+       covered_by: "test_cases api_smoke.yaml（12 组）→ pytest -m smoke（43 条）"}
+    - {domain: XC, rules: 7, yaml_registered: false, automated: covered,
+       covered_by: "跨域纪律，渗透在各用例的断言方式里（无独立用例）", note: "本知识库新增"}
+    - {domain: SRCH, rules: 0, yaml_registered: false, automated: partial,
+       covered_by: "api/test_search.py(15) + UserSearchTest(16)", gap_detail: "**无结构化规则条目** —— 见 issues.yaml M-05"}
+  rule_coverage_scoreboard:
+    domains_with_structured_rules: 15
+    domains_fully_automated: 13
+    domains_partial: 3
+    domains_unreachable_items: 4
+  unreachable_items:
+    desc: "**不是「没测」，是「测不了」** —— 不应计入覆盖缺口的分母。"
+    items:
+      - {id: EMPTY_COMMENT, reason: "死枚举，全库无引用", actual: "400 PARAM_INVALID"}
+      - {id: INVALID_TARGET_TYPE, reason: "targetType=4 被 @Max(3) 先拦", actual: "400 PARAM_INVALID"}
+      - {id: CANNOT_DISABLE_ADMIN, reason: "种子只有 1 个管理员", actual: "400 CANNOT_OPERATE_SELF 先命中"}
+      - {id: "TOO_MANY_IMAGES(Service 分支)", reason: "@Size(max=9) 先拦", actual: "400 PARAM_INVALID（文案相同，无风险）"}
+
+# ═══════════════════════════════════════════════════════════════
+# 4. PARAMETER 层
+# ═══════════════════════════════════════════════════════════════
+parameter_layer:
+  source: data/test_data.yaml（41 个字段）｜data/data_model.yaml → boundary_constants
+  status:
+    - {dimension: 必填字段缺失/null/空, covered: true, note: "各端点均有 parametrize 覆盖"}
+    - {dimension: 长度边界(min/max/min-1/max+1), covered: true, note: "BizConstants 的 7 个长度常量均有覆盖"}
+    - {dimension: 格式正则(username/email), covered: true}
+    - {dimension: 枚举越界, covered: true, note: "gender/reasonType/targetType/status 均有"}
+    - {dimension: 路径参数非数字, covered: true, note: "「参数格式不正确：id」"}
+    - {dimension: "LIKE 通配符转义（% _ \\）", covered: true, note: "test_search.py 专测"}
+    - {dimension: 分页越界(page/size 超 50), covered: true, note: "被钳到 50，不报错"}
+    - {dimension: "特殊 id 值（0 / 负数 / 极大数）", covered: false,
+       gap_detail: "「0 能匹配 {id:[0-9]+} 但库中无 id=0 → 预期 404」**未见测试验证** —— 见 issues.yaml U-03"}
+    - {dimension: "email 无点 TLD（a@b）", covered: false,
+       gap_detail: "取决于 Hibernate Validator 实现，**未实测** —— 见 issues.yaml U-01"}
+    - {dimension: "username 大小写是否算重复（Alice vs alice）", covered: false,
+       gap_detail: "**未实测**，标记 UNKNOWN，不要断言 —— 见 issues.yaml U-01"}
+
+# ═══════════════════════════════════════════════════════════════
+# 5. ROLE / PERMISSION 层
+# ═══════════════════════════════════════════════════════════════
+role_layer:
+  source: permissions/permission_matrix.yaml
+  identity_states: 7
+  status:
+    - {state: ID-ANON（未登录）, covered: true, note: "各文件均有 requires_login 类用例"}
+    - {state: ID-USER, covered: true}
+    - {state: ID-ADMIN, covered: true, note: "admin_client / login('admin')"}
+    - {state: ID-DISABLED, covered: true, note: "SEC-002 + test_auth.py:140-161"}
+    - {state: ID-DELETED, covered: true, note: "种子 deleted001；本轮补了 auth_layer_probe 实测"}
+    - {state: ID-BAD-TOKEN, covered: true, note: "伪造 token 用例"}
+    - {state: ID-NO-PREFIX, covered: true, note: "Authorization 缺 Bearer 前缀"}
+  resource_ownership:
+    - {resource: post, action: delete, covered: true, note: "SEC-009"}
+    - {resource: comment, action: delete, covered: true, note: "SEC-010"}
+    - {resource: notification, action: mark_read, covered: true, note: "SEC-008"}
+    - {resource: conversation, action: read/markread, covered: true, note: "CONV-012"}
+    - {resource: user, action: update_status, covered: partial, note: "SEC-004 不可达"}
+  admin_matrix_gap: "4 个写接口缺矩阵式 401/403 断言 —— 见 §1 F-ADMIN 与 issues.yaml M-07"
+
+# ═══════════════════════════════════════════════════════════════
+# 6. STATE 层
+# ═══════════════════════════════════════════════════════════════
+state_layer:
+  source: states/state_machines.yaml（10 个状态机）
+  status:
+    - {machine: report_status, transitions_covered: "正常/重复/非法动作/不匹配/逆向", covered: true, note: "RPT-004..010 + AdminReportControllerTest(18)"}
+    - {machine: user_account.status, transitions_covered: "禁用/解禁/不能操作自己", covered: partial, gap: "CANNOT_DISABLE_ADMIN 不可达"}
+    - {machine: follow_relation, transitions_covered: "全部 4 个转换", covered: true, note: "含「取消后重建」"}
+    - {machine: post_like_relation, transitions_covered: "全部 4 个转换", covered: true}
+    - {machine: message_is_read, transitions_covered: "0→1、幂等", covered: true}
+    - {machine: notification_is_read, transitions_covered: "0→1（单条/全部）、幂等、越权", covered: true}
+    - {machine: conversation_visibility, transitions_covered: "EMPTY→ACTIVE", covered: true, note: "test_empty_conversation_is_hidden"}
+    - {machine: conversation_unread, transitions_covered: "增加/清零", covered: true}
+    - {machine: mutual_follow_gate, transitions_covered: "全部 4 种状态 + 转换", covered: true, note: "**专项 25 条**"}
+    - {machine: post_lifecycle, transitions_covered: "ACTIVE→DELETED、越权、重复", covered: true}
+    - {machine: comment_lifecycle, transitions_covered: "同上 + 父动态级联", covered: true}
+
+# ═══════════════════════════════════════════════════════════════
+# 7. WORKFLOW 层
+# ═══════════════════════════════════════════════════════════════
+workflow_layer:
+  source: workflows/workflows.yaml（10 条流程）
+  status:
+    - {id: WF-01, name: "注册→登录→读自己", covered: true}
+    - {id: WF-02, name: "上传→发帖→可访问闭环", covered: true, note: "test_uploaded_file_is_reachable"}
+    - {id: WF-03, name: "动态全生命周期", covered: true}
+    - {id: WF-04, name: "社交互动与通知联动", covered: true}
+    - {id: WF-05, name: "互关私聊全流程", covered: true, note: "**最重要的流程**，专项 25 条"}
+    - {id: WF-06, name: "取消关注后关注流不残留", covered: true, note: "浏览器层 BUG-001"}
+    - {id: WF-07, name: "举报→处置→下线→日志", covered: true}
+    - {id: WF-08, name: "禁用→Token 失效→解禁", covered: true}
+    - {id: WF-09, name: "搜索→主页→关注状态", covered: true}
+    - {id: WF-10, name: "前端筛选状态一致性", covered: true, note: "浏览器层 BUG-002/003/004"}
+  end_to_end_script: {path: tests/e2e_walkthrough.py, note: "人工走查用，不进 pytest 收集"}
+
+# ═══════════════════════════════════════════════════════════════
+# 8. TEST CATEGORY 层
+# ═══════════════════════════════════════════════════════════════
+category_layer:
+  source: test_policy.yaml → required_categories
+  status:
+    - {category: CAT-positive, covered: true, score: "50/50 端点"}
+    - {category: CAT-required-field, covered: true}
+    - {category: CAT-boundary, covered: true, note: "7 个长度常量 + 3 个种子边界样本"}
+    - {category: CAT-invalid-format, covered: partial, note: "email 无点 TLD 未实测（U-01）"}
+    - {category: CAT-cross-field, covered: true, note: "8 条跨字段规则均有覆盖"}
+    - {category: CAT-duplicate, covered: true, note: "5 个唯一键 + 举报重复处理"}
+    - {category: CAT-relationship-state, covered: true}
+    - {category: CAT-permission, covered: partial, note: "后台 4 个写接口缺矩阵"}
+    - {category: CAT-state-transition, covered: true}
+    - {category: CAT-verification-order, covered: true, note: "叠加违规 8 个组合"}
+    - {category: CAT-side-effect, covered: true, note: "计数双断言 + 逻辑/物理删除断言"}
+    - {category: CAT-concurrency, covered: partial, note: "6/7（CONC-007 gap）"}
+    - {category: CAT-idempotency, covered: true}
+    - {category: CAT-serialization, covered: true, note: "ResponseSerializationTest(6) 专测"}
+    - {category: CAT-exception-branch, covered: true}
+
+# ═══════════════════════════════════════════════════════════════
+# 9. 覆盖查询（CoverageValidator 应该能回答的问题）
+# ═══════════════════════════════════════════════════════════════
+queries:
+  desc: "本文件的设计目标是让下面这些问题都能用**程序**回答，而不是靠人读文档。"
+  supported:
+    - q: "这个业务规则有没有测试？"
+      data_path: "rule_layer.domains[].automated + rules/business_rules.yaml[].existing_cases"
+    - q: "这个 API 有没有测试？"
+      data_path: "api_layer.per_module + api/endpoints.yaml[].existing_cases"
+    - q: "这个参数有没有边界测试？"
+      data_path: "parameter_layer.status[]"
+    - q: "这个角色有没有覆盖？"
+      data_path: "role_layer.status[]"
+    - q: "这个状态转换有没有覆盖？"
+      data_path: "state_layer.status[].transitions_covered"
+    - q: "这个流程有没有端到端覆盖？"
+      data_path: "workflow_layer.status[]"
+    - q: "这条规则在哪几个测试里被断言？"
+      data_path: "rules/business_rules.yaml[].existing_cases（指针，不复制内容）"
+    - q: "还有哪些缺口可以补？"
+      data_path: "issues.yaml 的 MISSING 段 + existing_tests.yaml → incremental_opportunities"
+
+# ═══════════════════════════════════════════════════════════════
+# 10. 覆盖达标线（CoverageValidator 判定用）
+# ═══════════════════════════════════════════════════════════════
+thresholds:
+  desc: "生成结果必须同时满足下列条件才算「覆盖达标」，否则进入 Retry/Repair。"
+  gates:
+    - {id: CG-01, gate: "每个被要求的 feature 至少命中 1 条用例"}
+    - {id: CG-02, gate: "每个被引用的 API 必须存在于 api/endpoints.yaml"}
+    - {id: CG-03, gate: "每个被引用的 rule_id 必须存在于 business_rules.yaml 或 test_cases/*.yaml 或本知识库"}
+    - {id: CG-04, gate: "生成的 category 集合必须覆盖 test_policy 中该 requirement 的 required_categories 子集"}
+    - {id: CG-05, gate: "所有「叠加违规」用例的预期码必须与 validation_order.yaml 一致"}
+    - {id: CG-06, gate: "涉及计数的用例必须包含 2 条独立断言（计数 + 关系行数）"}
+    - {id: CG-07, gate: "涉及权限的用例必须覆盖至少 2 种身份状态"}
+    - {id: CG-08, gate: "不得为 unreachable_items 生成用例（命中即判不通过）"}
+  retry_policy:
+    on_fail: "把失败原因（缺失的 category / 不存在的 rule_id / 顺序不符）回灌给 LLM 重新生成"
+    max_retries: 3
+    escalate: "3 次仍不达标 → 标记为需人工介入，不要强行通过"
+
+ai_checklist:
+  - "找空白优先看 issues.yaml 的 MISSING 段，其次 §1 features 里 coverage: partial 的项"
+  - "不要为 unreachable_items 生成用例（CG-08）"
+  - "生成后按 §10 的 8 条 gate 自检，不达标就重生成而不是交给执行器"
+  - "本文件是覆盖判定的**唯一来源**，不要另建一套覆盖口径"

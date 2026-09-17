@@ -11,7 +11,7 @@ meta:
   module: message / conversation / follow / like
   frozen_rules: 1
   last_verified: 2026-09-14
-  pytest_baseline: "248 passed / 0 failed"
+  pytest_baseline: "250 passed / 0 failed"
   junit_baseline: "291 run / 0 failures / 0 errors"
 
 # ============================================================
@@ -353,7 +353,7 @@ conversation_rules:
     rule: markRead 与 listMessages 共用 requireMember 校验
     frozen_at: 2026-09-11
     preconditions: [A、B 有会话；C 是无关用户]
-    steps: [C 调用 PUT /api/conversations/{id}/read]
+    steps: ["C 调用 PUT /api/conversations/{id}/read"]
     expected:
       code: 403
       message: 你不是该会话的参与者

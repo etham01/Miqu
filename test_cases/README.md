@@ -1,8 +1,8 @@
 # test_cases —— YAML 测试用例管理
 
 > **先说清楚定位**：本目录是**测试设计与用例管理文档**，不参与执行。
-> 可执行的事实来源是 `backend/src/test`（JUnit，291）与 `tests/`（pytest，248），
-> 以及前端状态层的 `tests/browser_regression.mjs`（12 项断言）。
+> 可执行的事实来源是 `backend/src/test`（JUnit，291）与 `tests/`（pytest，250），
+> 以及前端状态层的 `tests/browser_regression.mjs`（15 项断言）。
 
 字段定义与 ID 规则见 [`../docs/testing/TEST_CASE_SCHEMA.md`](../docs/testing/TEST_CASE_SCHEMA.md)。
 覆盖对照表见 [`../docs/testing/TEST_COVERAGE_MATRIX.md`](../docs/testing/TEST_COVERAGE_MATRIX.md)。
@@ -40,10 +40,10 @@
 | 文件 | 内容 | 条目 |
 |---|---|---|
 | [`core_business_rules.yaml`](core_business_rules.yaml) | 冻结的核心业务规则：互关私聊、关注、点赞、会话 | 37 |
-| [`security_and_concurrency.yaml`](security_and_concurrency.yaml) | 认证越权、注入、上传安全、并发竞态、**前端 UI 竞态** | 34 |
+| [`security_and_concurrency.yaml`](security_and_concurrency.yaml) | 认证越权、注入、上传安全、并发竞态、**前端 UI 竞态** | 36 |
 | [`api_smoke.yaml`](api_smoke.yaml) | 冒烟集合（`-m smoke`，43 条） | 12 组 |
 
-合计 **98 条**（96 implemented / 2 gap），可用 `check_consistency.py` 一键核对。
+合计 **100 条**（98 implemented / 2 gap），可用 `check_consistency.py` 一键核对。
 
 ---
 

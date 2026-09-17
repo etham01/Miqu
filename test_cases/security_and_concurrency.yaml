@@ -8,8 +8,9 @@
 meta:
   module: security / file / concurrency / ui_race
   last_verified: 2026-09-14
-  pytest_baseline: "248 passed / 0 failed"
-  browser_baseline: "12 passed / 0 failed"
+  pytest_baseline: "250 passed / 0 failed"
+  browser_baseline: "15 passed / 0 failed"
+  junit_baseline: "291 run / 0 failures / 0 errors"
 
 # ============================================================
 # 一、认证与越权（SEC）
@@ -186,6 +187,37 @@ security_rules:
       仍是外部图床 https://i.pravatar.cc/...。本校验只作用于**写入**，
       存量行不受影响；因此"文档要求相对路径、种子却是外链"这处不一致依然存在，
       属数据侧的既有问题，不在接口校验范围内。
+
+  - id: SEC-012
+    title: 缺失的静态资源返回真正的 HTTP 404（而业务接口仍是 HTTP 200）
+    priority: P2
+    type: security
+    rule: |
+      `/uploads/**` 是静态资源，不是业务接口，**有意例外**于
+      「HTTP 恒 200，结果看 body.code」的项目约定（BUG-007 已修复）。
+      理由：浏览器 `<img>` 与 CDN 靠状态码判断"取不到"；包成 200 会让 `<img>`
+      拿到一段 JSON 去解码（必然失败 → 破图），也会让缓存层把不存在的资源
+      当成一次成功响应。
+    frozen_at: 2026-09-16
+    preconditions: [无]
+    steps:
+      - GET /uploads/image/2026/09/definitely-not-exist.png（文件不存在）
+      - GET /api/definitely-not-exist（未映射的业务路径，做对照）
+    expected:
+      static_http: 404
+      static_code: 404
+      api_http: 200
+      api_code: 404
+      effect: 静态资源语义正确；同时 /api/** 的对外契约未被改动
+    pytest: api/test_file.py::test_missing_uploaded_file_returns_real_404
+    status: implemented
+    history: |
+      2026-09-16 修复前实测：缺失的 /uploads 文件返回
+      `http=200 content-type=application/json {"code":404,...}`。
+      修复：GlobalExceptionHandler.handleNoResource 按请求 URI 分流——
+      落在上传前缀下的返回 ResponseEntity.status(404)，其余沿用 200。
+      对照组 api/test_file.py::test_unknown_api_path_keeps_http_200 防止后人
+      把这条例外错误地推广到业务接口。
 
 # ============================================================
 # 二、文件上传安全（FILE）
@@ -375,7 +407,7 @@ concurrency_rules:
     rule: uk_follower_following 唯一键兜底
     frozen_at: 2026-09-11
     preconditions: [8 线程同一用户并发关注同一目标]
-    steps: [并发 POST /api/users/{id}/follow]
+    steps: ["并发 POST /api/users/{id}/follow"]
     expected:
       code: 409
       effect: 恰好 1 个 200；follow 表恰好 1 行；粉丝数与关注数都只 +1
@@ -388,7 +420,7 @@ concurrency_rules:
     type: concurrency
     frozen_at: 2026-09-11
     preconditions: [已关注，8 线程并发取消]
-    steps: [并发 DELETE /api/users/{id}/follow]
+    steps: ["并发 DELETE /api/users/{id}/follow"]
     expected:
       code: 404
       effect: 恰好 1 个 200，其余 404；粉丝数归 0
@@ -402,7 +434,7 @@ concurrency_rules:
     rule: uk_post_user 唯一键兜底；like_count 是冗余计数，必须与关系表一致
     frozen_at: 2026-09-11
     preconditions: [8 线程同一用户并发点赞同一条动态]
-    steps: [并发 POST /api/posts/{id}/like]
+    steps: ["并发 POST /api/posts/{id}/like"]
     expected:
       code: 409
       effect: 恰好 1 个 200；likeCount 只 +1
@@ -577,3 +609,30 @@ ui_race_rules:
       2026-09-14 Bug Hunt 首次登记。API + DB + 真实浏览器 + Code Review 四路证据
       一致表明后端与前端行为都正确（详见 docs/testing/bug_report.md）。
       固化为长期回归用例。
+
+  - id: CONC-012
+    title: 头像取不到时必须降级为首字母占位，而不是永久破图
+    priority: P1
+    type: ui_state_race
+    rule: |
+      图片加载失败（404 / 外链被拦 / 非图片内容）时，头像要退化成首字母占位，
+      与"没配头像"的表现一致（BUG-006 已修复）。
+      全站 15 处头像共用 `components/UserAvatar.vue`，所以这一层兜底全站生效。
+    frozen_at: 2026-09-16
+    preconditions:
+      - A 的头像被写成"前缀合法、但磁盘上不存在"的路径
+    steps:
+      - 用真实浏览器打开 A 的主页
+    expected:
+      effect: |
+        页面上 0 个解码失败的 <img>；出现首字母占位 <span>
+    pytest: null
+    browser: browser_regression.mjs::BUG-006
+    status: implemented
+    history: |
+      2026-09-16 修复前实测：`UserAvatar.vue` 只有 `v-if="src"`（判断有没有值），
+      没有 `@error`（判断能不能加载出来）→ 2 个 <img> naturalWidth=0、
+      首字母占位 0 个。截图 .workbuddy/screenshots/avatar-broken-fallback.png。
+      修复：加 failed 状态 + `@error` 兜底 + watch(src) 让换头像后重试。
+      同批发现的 BUG-007（静态 404 被包成 200）与 BUG-008
+      （头像接口不校验文件存在）见 docs/testing/avatar-issue-diagnosis.md。

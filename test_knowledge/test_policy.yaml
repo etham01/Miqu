@@ -1,0 +1,409 @@
+# 测试生成策略
+#
+# 用途：回答「**AI 应该生成哪些类别的用例、每类怎么生成、哪些不要生成**」。
+#       这是"生成什么"的决策表，不是文档装饰。
+#
+# 与其它文件的分工：
+#   test_policy.yaml     → 决定**生成哪些类别**（本文件）
+#   coverage_matrix.yaml → 判定**覆盖是否达标**（覆盖的度量）
+#   ai_grounding.yaml    → 约束**不得臆造什么**（事实边界）
+#   generation_contract.yaml → 规定**整条流水线的输入输出契约**
+#
+# 消费者：LLM（选类别）｜CoverageValidator（判定达标线）｜执行器（决定生成多少条）
+#
+# 真相来源：本项目的实际取值常量（BizConstants.java / DTO 注解 / schema.sql 唯一键）
+# confidence: CONFIRMED
+# verified_at: 2026-09-17
+
+meta:
+  generated_at: 2026-09-17
+  scope: "50 个端点 / 78 条规则事实 / 11 张表"
+  principle: >-
+    **类别按"项目实际存在的能力"启用，不按通用清单全开。**
+    例如"并发类别"只有 6 个场景有意义（因为只有 6 处唯一键/竞态点）；
+    "幂等类别"只对 3 个端点适用（其余端点的重复调用是 409/404，属于重复类别）。
+  cross_refs:
+    validation_order: rules/validation_order.yaml
+    side_effects: rules/side_effects.yaml
+    states: states/state_machines.yaml
+    permissions: permissions/permission_matrix.yaml
+    data: data/test_data.yaml
+    boundary_constants: data/data_model.yaml → boundary_constants
+
+# ═══════════════════════════════════════════════════════════════
+# 1. 必需类别（required categories）
+# ═══════════════════════════════════════════════════════════════
+required_categories:
+
+  - id: CAT-positive
+    name: 正常路径
+    enabled: true
+    priority: P0
+    desc: "合法输入 → 200 + 正确的 data 结构"
+    apply_to: "全部 50 个端点（无例外）"
+    must_assert:
+      - "code == 200"
+      - "data 的字段名与类型（id 字符串 / 计数数字，XC-002）"
+      - "P0 端点还要断言 rules/side_effects.yaml 里的关键副作用"
+    count_guidance: "每端点至少 1 条"
+
+  - id: CAT-required-field
+    name: 必填字段缺失 / 为 null / 为空
+    enabled: true
+    priority: P0
+    desc: "逐个抹掉一个必填字段，断言 400 + 具体字段文案"
+    required_fields_policy:
+      test_missing: true
+      test_null: true
+      test_empty: true
+      test_whitespace_only: true
+      strategy: "**每个必填字段各生成 1 条**（不要只测第一个）"
+    apply_to:
+      - {endpoint: POST_AUTH_REGISTER, fields: [username, password, nickname, email]}
+      - {endpoint: POST_AUTH_LOGIN, fields: [username, password]}
+      - {endpoint: PUT_USERS_ME, fields: [nickname]}
+      - {endpoint: PUT_USERS_ME_PASSWORD, fields: [oldPassword, newPassword]}
+      - {endpoint: PUT_USERS_ME_AVATAR, fields: [avatar]}
+      - {endpoint: POST_POSTS, fields: [], note: "content 与 images **都不是必填**，但有跨字段规则（见 CAT-cross-field）"}
+      - {endpoint: POST_POSTS_ID_COMMENTS, fields: [content]}
+      - {endpoint: POST_MESSAGES, fields: [receiverId, content]}
+      - {endpoint: POST_CONVERSATIONS, fields: [targetUserId]}
+      - {endpoint: POST_REPORTS, fields: [targetType, targetId, reasonType]}
+      - {endpoint: PUT_ADMIN_USERS_ID_STATUS, fields: [status]}
+      - {endpoint: PUT_ADMIN_REPORTS_ID_HANDLE, fields: [status]}
+    assert_note: >-
+      ⚠️ 断言 message 时用**具体字段文案**（如「用户名不能为空」），
+      **不要**断 PARAM_INVALID 的默认文案「参数校验失败」——
+      GlobalExceptionHandler 用 findFirst() 取具体字段文案替换它。
+
+  - id: CAT-boundary
+    name: 边界值
+    enabled: true
+    priority: P0
+    boundary:
+      enabled: true
+      strategies: [min, min_minus_one, max, max_plus_one]
+      note: "**只对本项目真实存在长度/范围约束的字段做**；无约束的字段（如 post.content 的下界由跨字段规则管）不要硬造边界"
+    boundary_table:
+      desc: "取值来源：BizConstants.java。改常量即改这里 —— 生成时**必须用这些数字**，不要凭常识"
+      fields:
+        - {field: username, type: String, min: 4, max: 20, extra: "且必须匹配 ^[A-Za-z][A-Za-z0-9_]*$"}
+        - {field: password, type: String, min: 6, max: 20, note: "注册与改密码都适用"}
+        - {field: nickname, type: String, max: 32, min: "无（但 @NotBlank → 至少 1 个非空白）"}
+        - {field: email, type: String, max: 64, format: email, note: "另有 @Email 格式校验"}
+        - {field: bio, type: String, max: 255}
+        - {field: avatar, type: String, max: 255, extra: "且必须以 /uploads/ 开头"}
+        - {field: "post.content", type: String, max: 1000, note: "**可为空**（纯图片动态）"}
+        - {field: "post.images", type: "List<String>", max: 9, min: 0, note: "9 是需求上限；超 9 由 @Size 拦为 PARAM_INVALID，文案与 TOO_MANY_IMAGES 相同"}
+        - {field: "comment.content", type: String, max: 500, min: "非空白"}
+        - {field: "message.content", type: String, max: 1000, min: "非空白"}
+        - {field: "report.reasonDetail", type: String, max: 255}
+        - {field: "report.reasonType", type: Integer, min: 1, max: 5}
+        - {field: "report.targetType", type: Integer, min: 1, max: 3, note: "**4 不可达**（@Max(3) 先拦，Service 分支是死代码）"}
+        - {field: "handleReport.status", type: Integer, min: 1, max: 2, note: "0(PENDING) 不可传入 —— 逆向转换在设计上被消除"}
+        - {field: "handleReport.handleRemark", type: String, max: 255}
+        - {field: "adminUserStatus.status", type: Integer, min: 0, max: 1}
+        - {field: gender, type: Integer, min: 0, max: 2}
+        - {field: "page / size", type: Integer, min: 1, max: 50, default: "page=1 size=10", note: "**超 50 不是报错**，是被钳到 50（见 data/test_data.yaml）"}
+    seed_based_boundaries:
+      desc: "种子数据本身设计了三个边界样本，可直接用于绝对值断言（纪律的唯一例外）"
+      items:
+        - "post id=1 → 9 张图片（上界）"
+        - "post id=2 → 0 张图片（下界，纯文字）"
+        - "post id=3 → 内容恰好 1000 字符（上界）"
+
+  - id: CAT-invalid-format
+    name: 非法格式 / 非法取值
+    enabled: true
+    priority: P1
+    examples:
+      - "username: 以数字开头 / 含空格 / 含中文 / 含连字符"
+      - "email: 无 @ / 无域名 / 无点 TLD（⚠️ 见 issues.yaml U-01，Hibernate Validator 默认允许，需实测）"
+      - "id 路径参数: 非数字（/api/posts/abc）→ 400 + 「参数格式不正确：id」"
+      - "枚举越界: gender=3、reasonType=6、targetType=0/4、status=9"
+      - "JSON 结构错误: 请求体不是合法 JSON → 400 + 「请求体格式不正确」"
+      - "Content-Type 错误: 非 JSON / 非 multipart"
+      - "不存在的 action 字符串 → 400 INVALID_REPORT_ACTION"
+
+  - id: CAT-cross-field
+    name: 跨字段规则（本项目特有，**不要漏**）
+    enabled: true
+    priority: P0
+    desc: "单个字段都合法，但组合起来非法。这类规则用「逐字段」思路测不出来。"
+    rules:
+      - {id: POST-001, rule: "content 与 images 不能同时为空", endpoint: POST_POSTS, setup: "content='' 且 images=[]", expect: "400 EMPTY_POST"}
+      - {id: POST-004, rule: "图片 URL 必须来自本项目的上传接口", endpoint: POST_POSTS, setup: "images=['https://evil.com/x.png']", expect: "400 INVALID_IMAGE_URL"}
+      - {id: USER-004, rule: "头像 URL 必须以 /uploads/ 开头", endpoint: PUT_USERS_ME_AVATAR, setup: "avatar='https://x/y.png'", expect: "400 INVALID_IMAGE_URL"}
+      - {id: USER-005, rule: "前缀校验带尾部斜杠（近似串被拒）", endpoint: PUT_USERS_ME_AVATAR, setup: "avatar='/uploads-evil/x.png'", expect: "400 INVALID_IMAGE_URL"}
+      - {id: RPT-006, rule: "处置动作必须与举报目标类型匹配", endpoint: PUT_ADMIN_REPORTS_ID_HANDLE, setup: "对 POST 类举报用 DELETE_COMMENT", expect: "400 REPORT_ACTION_MISMATCH"}
+      - {id: RPT-007, rule: "驳回时不能同时处置", endpoint: PUT_ADMIN_REPORTS_ID_HANDLE, setup: "status=2 + action=DELETE_POST", expect: "400 REJECT_WITH_ACTION_NOT_ALLOWED"}
+      - {id: MSG-011, rule: "必须互关才能发私信", endpoints: [POST_MESSAGES, POST_CONVERSATIONS], setup: "非互关", expect: "403 NOT_MUTUAL_FOLLOW"}
+      - {id: RPT-002, rule: "不能举报自己", endpoint: POST_REPORTS, setup: "targetId = 自己的动态", expect: "400 CANNOT_REPORT_SELF"}
+
+  - id: CAT-duplicate
+    name: 重复 / 冲突
+    enabled: true
+    priority: P0
+    duplicate:
+      enabled: true
+      note: "重复调用返回 409 或 404（不是 200），**与「幂等」是两回事**"
+    cases:
+      - {endpoint: POST_AUTH_REGISTER, duplicate_of: username, expect: "409 USERNAME_EXISTS", unique_key: uk_username}
+      - {endpoint: POST_AUTH_REGISTER, duplicate_of: email, expect: "409 EMAIL_EXISTS", unique_key: uk_email, setup_note: "**必须换一个 username、只让 email 相同**，否则先命中 USERNAME_EXISTS"}
+      - {endpoint: POST_USERS_ID_FOLLOW, duplicate_of: "该关系", expect: "409 ALREADY_FOLLOWED", unique_key: uk_follower_following}
+      - {endpoint: POST_POSTS_ID_LIKE, duplicate_of: "该关系", expect: "409 ALREADY_LIKED", unique_key: uk_post_user}
+      - {endpoint: POST_REPORTS, duplicate_of: "(reporter,targetType,targetId)", expect: "409 ALREADY_REPORTED", unique_key: uk_reporter_target,
+         crucial_note: "**换一个人举报同一目标是 200** —— 唯一键含 reporter_id"}
+      - {endpoint: PUT_ADMIN_REPORTS_ID_HANDLE, duplicate_of: "已处理的举报", expect: "409 REPORT_ALREADY_HANDLED"}
+    negative_duplicates:
+      - {endpoint: POST_AUTH_REGISTER, expect: "**不同大小写的 username 是否算重复未实测** → 见 issues.yaml U-01，标记 UNKNOWN，不要断言"}
+      - {endpoint: POST_POSTS_ID_COMMENTS, note: "评论**没有唯一约束**，重复内容会产生多条 —— 这是预期行为，不要断言 409"}
+      - {endpoint: POST_MESSAGES, note: "消息无去重，重复内容是合法操作"}
+
+  - id: CAT-relationship-state
+    name: 关系存在性（取消/重建）
+    enabled: true
+    priority: P0
+    desc: "关系表是**物理删除**，因此「取消后可立即重建」是可测的关键行为"
+    cases:
+      - {rule: FOL-002, flow: "关注 → 取消 → **再关注（必须 200）**", endpoint: POST_USERS_ID_FOLLOW, why: "若唯一键被软删行占用，第二步会 409 —— 这个用例能抓出来"}
+      - {rule: LIKE-002, flow: "点赞 → 取消 → **再点赞（必须 200）**", endpoint: POST_POSTS_ID_LIKE}
+      - {rule: FOL-003, flow: "未关注就取关 → 404 NOT_FOLLOWED", endpoint: DELETE_USERS_ID_FOLLOW}
+      - {rule: LIKE-003, flow: "未点赞就取消 → 404 NOT_LIKED", endpoint: DELETE_POSTS_ID_LIKE}
+      - {rule: MSG-014, flow: "互关 → 发消息 → 解除互关 → 再发（403）→ 重新互关 → 再发（200）", endpoint: POST_MESSAGES}
+
+  - id: CAT-permission
+    name: 权限 / 越权
+    enabled: true
+    priority: P0
+    authorization:
+      enabled: true
+      identity_states: "7 种（见 permissions/permission_matrix.yaml §1）"
+      required_dimensions:
+        - "未登录（anonymous）"
+        - "普通用户（role=1）"
+        - "管理员（role=2）"
+        - "资源所有者 vs 非所有者"
+        - "禁用账号的旧 Token"
+        - "已注销账号的旧 Token"
+        - "非法/篡改 Token"
+      apply_to: "全部需登录端点（38 个）；白名单 12 个端点另测「未登录应 200」"
+      matrix_source: permissions/permission_matrix.yaml
+      assert_rule: "**403 与 404 必须成对生成**（存在但无权 vs 不存在）—— 项目的语义约定"
+
+  - id: CAT-state-transition
+    name: 状态迁移
+    enabled: true
+    priority: P1
+    variants_required: [正常转换, 非法转换, 重复转换, 逆向转换, 越权转换]
+    apply_to:
+      - {machine: report_status, endpoints: [PUT_ADMIN_REPORTS_ID_HANDLE], transitions: "见 states/state_machines.yaml"}
+      - {machine: user_account.status, endpoints: [PUT_ADMIN_USERS_ID_STATUS]}
+      - {machine: follow_relation, endpoints: [POST_USERS_ID_FOLLOW, DELETE_USERS_ID_FOLLOW]}
+      - {machine: post_like_relation, endpoints: [POST_POSTS_ID_LIKE, DELETE_POSTS_ID_LIKE]}
+      - {machine: message_is_read, endpoints: [PUT_CONVERSATIONS_ID_READ]}
+      - {machine: notification_is_read, endpoints: [PUT_NOTIFICATIONS_ID_READ, PUT_NOTIFICATIONS_READ_ALL]}
+      - {machine: conversation_visibility, endpoints: [POST_MESSAGES, GET_CONVERSATIONS]}
+      - {machine: mutual_follow_gate, endpoints: [POST_MESSAGES, POST_CONVERSATIONS]}
+      - {machine: post_lifecycle, endpoints: [DELETE_POSTS_ID]}
+      - {machine: comment_lifecycle, endpoints: [DELETE_COMMENTS_ID]}
+    must_skip: "先查 states/state_machines.yaml → unreachable_transitions，命中就换设计"
+
+  - id: CAT-verification-order
+    name: 叠加违规（校验顺序）
+    enabled: true
+    priority: P0
+    desc: >-
+      一个请求同时违反多条规则时，**断言哪个码由代码顺序决定**。
+      这是本项目历史上真出过错的地方（曾把「非互关+空内容」误记为 403，实测 400）。
+    rule: "生成前必读 rules/validation_order.yaml 的 §1 assertion_algorithm"
+    required_for: "所有可能被同时违反 ≥2 条规则的写端点"
+    coverage_target: "至少覆盖 8 个「叠加违规」组合（见 validation_order.yaml §3 stacked_violation_winners）"
+
+  - id: CAT-side-effect
+    name: 副作用 / 数据一致性
+    enabled: true
+    priority: P0
+    desc: "断言「连带动了什么」，而不只是响应体"
+    mandatory_assertions:
+      - rule: XC-005
+        what: "冗余计数与实际关系行数是**两条独立断言**"
+        applies_to: [POST_USERS_ID_FOLLOW, DELETE_USERS_ID_FOLLOW, POST_POSTS, DELETE_POSTS_ID,
+                     POST_POSTS_ID_LIKE, DELETE_POSTS_ID_LIKE, POST_POSTS_ID_COMMENTS, DELETE_COMMENTS_ID]
+      - rule: XC-003
+        what: "直接 SQL 断言业务主表必须带 AND deleted = 0"
+        applies_to: [user, post, comment, message, notification]
+      - rule: XC-004
+        what: "关系表字段断言「行已消失」，而不是 deleted=1"
+        applies_to: [follow, post_like, post_image]
+      - rule: "通知回撤是**逻辑删除**"
+        what: "断言通知消失应查 `deleted` 列（行仍在），不是 COUNT=0（2026-09-17 实测确认）"
+        applies_to: [DELETE_USERS_ID_FOLLOW, DELETE_POSTS_ID_LIKE, DELETE_POSTS_ID]
+    source: rules/side_effects.yaml
+
+  - id: CAT-concurrency
+    name: 并发 / 竞态
+    enabled: true
+    priority: P0
+    apply_to_framework: pytest（**不要写 JUnit** —— MockMvc 是单线程模型；也不要纯浏览器 —— 当前脚本只做单线程时序竞态）
+    scope:
+      note: "**只在这 6 处有意义** —— 因为只有这 6 处存在唯一键/竞态点。不要泛化到其它端点。"
+      cases:
+        - {id: CONC-001, scenario: "同一用户名并发注册", assert: "恰好 1 成功，其余 409", unique_key: uk_username}
+        - {id: CONC-002, scenario: "并发重复关注", assert: "恰好 1 成功；follower_count 只 +1", unique_key: uk_follower_following}
+        - {id: CONC-003, scenario: "并发取消关注", assert: "恰好 1 成功；粉丝数归 0", unique_key: "-"}
+        - {id: CONC-004, scenario: "并发重复点赞", assert: "恰好 1 成功；like_count 只 +1", unique_key: uk_post_user}
+        - {id: CONC-005, scenario: "并发建会话", assert: "全部成功且 id 唯一（收敛为同一条）", unique_key: uk_users,
+           note: "实现用 REQUIRES_NEW 重查避免 REPEATABLE READ 快照读误报 409"}
+        - {id: CONC-006, scenario: "并发发消息", assert: "全部落库；未读 = 条数 = 成功数", unique_key: "-"}
+    required_techniques:
+      - "**每个线程独立 requests.Session**（Session 非线程安全），共享同一 Token"
+      - "用 threading.Barrier 把线程压到同一时刻起跑 —— 否则「并发」会退化成串行，测不出竞态"
+    out_of_scope:
+      - {id: CONC-007, scenario: "数十线程同一瞬间首建会话", why: "属压测范畴，当前只做到 8 线程", status: gap}
+
+  - id: CAT-idempotency
+    name: 幂等
+    enabled: true
+    priority: P1
+    note: >-
+      ⚠️ **只有 3 个端点真正幂等**（重复调用产生与首次相同的副作用）。
+      其余端点的重复调用是 409/404 —— 那属于 CAT-duplicate，不要混淆。
+    idempotent_endpoints:
+      - {endpoint: PUT_NOTIFICATIONS_ID_READ, behavior: "isRead 已为 1 时直接 return，不执行 UPDATE"}
+      - {endpoint: PUT_NOTIFICATIONS_READ_ALL, behavior: "已读的行不会被再次更新"}
+      - {endpoint: PUT_CONVERSATIONS_ID_READ, behavior: "SQL 带 is_read=0 条件，第二次影响 0 行"}
+      - {endpoint: POST_CONVERSATIONS, behavior: "重复调用返回**同一个** conversation id，不新建"}
+    must_assert: "第二次调用的 code 与首次一致（200），且**副作用不累加**（如未读数不会二次归零出错）"
+
+  - id: CAT-serialization
+    name: 序列化契约
+    enabled: true
+    priority: P1
+    desc: "本项目有两条极易写错的序列化约定"
+    rules:
+      - {rule: "XC-002 所有 id 类字段是**字符串**", assert: 'data["id"] == "2"'}
+      - {rule: "XC-002 所有计数类字段是**数字**", assert: 'data["likeCount"] == 10'}
+      - {rule: "时间是格式化字符串（非时间戳）", source: "application.yml 的 write-dates-as-timestamps: false"}
+      - {rule: "分页 list 为空时是 **[]**，不是 null", source: "PageResult"}
+      - {rule: "hasNext = page * size < total"}
+    reference: api/conventions.yaml → serialization
+
+  - id: CAT-exception-branch
+    name: 异常分支（不存在 / 已删除 / 已禁用）
+    enabled: true
+    priority: P1
+    variants:
+      - "目标不存在（不存在的 id）→ 404"
+      - "目标已逻辑删除 → 404"
+      - "目标已禁用 → 423（仅当端点是「以它为操作目标」时；查看主页仍 200）"
+      - "父资源已删除（如评论的 post 已删）→ 相应 404"
+    must_skip: "先查 validation_order.yaml §4 死分支清单"
+
+# ═══════════════════════════════════════════════════════════════
+# 2. 不要生成的类别（excluded —— 与 required 同等重要）
+# ═══════════════════════════════════════════════════════════════
+excluded_categories:
+  desc: >-
+    这些**看起来该测但实际不该生成**。生成它们只会制造"必然失败"或"无意义"的用例。
+    每条都对应一个真实原因，不是"懒得测"。
+  items:
+    - id: EX-01
+      category: "死分支的预期码"
+      examples: ["EMPTY_COMMENT 错误码", "targetType=4 的 INVALID_TARGET_TYPE", "TOO_MANY_IMAGES 的 Service 分支", "requireActiveUser(currentUser) 的 404"]
+      reason: "代码存在但 HTTP 层不可触达（rules/validation_order.yaml §4）"
+      instead: "断言实际可达的码与文案"
+    - id: EX-02
+      category: "「不能禁用另一个管理员」(403 CANNOT_DISABLE_ADMIN)"
+      reason: "种子只有 1 个管理员，CANNOT_OPERATE_SELF 先命中（SEC-004 缺口）"
+      instead: "登记为缺口，等补第二个管理员种子"
+    - id: EX-03
+      category: "Token 失效相关（logout 后 / 改密码后）"
+      reason: "JWT 无状态，**不会失效** —— 断言 401 会得到 200"
+      instead: "只有「禁用账号」与「逻辑删除账号」能让 Token 失效"
+    - id: EX-04
+      category: "楼中楼 / 回复评论"
+      reason: "comment.parent_id 是预留列，API 完全不暴露"
+      instead: "断言传 parentId 会被静默忽略"
+    - id: EX-05
+      category: "私信通知（type=4）"
+      reason: "NotificationTypeEnum.MESSAGE 已 @Deprecated，一期不产生"
+      instead: "断言发私信**不**产生通知"
+    - id: EX-06
+      category: "给已有动态追加图片"
+      reason: "只有发布时一次性提交 images 数组，无单图增删接口"
+    - id: EX-07
+      category: "删除/撤回消息、删除会话、清空通知、恢复已删除内容"
+      reason: "**接口不存在**"
+    - id: EX-08
+      category: "前端单元/组件测试"
+      reason: "项目未引入 Vitest/Jest，**有意的取舍**"
+      instead: "前端状态层用 browser_regression.mjs"
+    - id: EX-09
+      category: "Mock 外部服务"
+      reason: "本项目没有第三方 API / 短信 / 支付 / OAuth / LLM —— **无物可 Mock**"
+      only_external: "i.pravatar.cc（仅种子头像 URL），离线时破图**不影响功能**，不是缺陷"
+    - id: EX-10
+      category: "数十线程压测 / 性能断言"
+      reason: "属性能测试范畴；且并发断言的目标是「最终数据只有一份」，不是吞吐量"
+    - id: EX-11
+      category: "在 JUnit 里写并发用例"
+      reason: "MockMvc 事务与线程绑定，多线程下 @Transactional 回滚失效"
+      instead: "并发统一放 tests/api/test_concurrency.py"
+    - id: EX-12
+      category: "创造不存在的角色/状态"
+      reason: "本项目只有 USER(1)/ADMIN(2) 两个角色；没有版主、超级管理员、VIP、禁言"
+      instead: "查 permissions/permission_matrix.yaml §1 does_not_exist"
+
+# ═══════════════════════════════════════════════════════════════
+# 3. 生成量与优先级策略
+# ═══════════════════════════════════════════════════════════════
+generation_volume:
+  max_cases_per_requirement: 30
+  rationale: "超过 30 条通常说明目标不聚焦；应拆成多个 requirement 分别生成"
+  default_distribution:
+    positive: "约 25%"
+    required_field_and_format: "约 25%"
+    boundary: "约 10%"
+    cross_field_and_order: "约 15%"
+    permission: "约 15%"
+    duplicate_and_state: "约 10%"
+  priority_strategy:
+    rule: "按被违反规则的优先级排序生成，P0 先出"
+    p0_sources:
+      - "XC-001（HTTP 恒 200）/ XC-005（计数双断言）/ XC-006（校验顺序）/ XC-007（差值断言）"
+      - "互关私聊（MSG/CONV 冻结规则）"
+      - "越权与认证边界（SEC）"
+      - "并发竞态（CONC）"
+      - "上传安全（FILE）"
+    p1: ["举报处置状态机", "冗余计数一致性", "前端状态一致性"]
+    p2: ["参数边界与格式（模式固定）", "分页组合（风险低）"]
+
+# ═══════════════════════════════════════════════════════════════
+# 4. 每条用例的必备结构
+# ═══════════════════════════════════════════════════════════════
+case_required_fields:
+  desc: "缺任意一项 → 该用例不可执行/不可追溯，应打回重生成"
+  fields:
+    - {name: id, rule: "唯一；沿用项目 14 个前缀（AUTH/USER/FOL/POST/LIKE/CMT/CONV/MSG/NOTI/SRCH/FILE/SEC/CONC/SMK）"}
+    - {name: traceability, rule: "至少含 feature / api / rule 三项，指向真实存在的 ID"}
+    - {name: precondition, rule: "可构造（种子已有 或 fresh_user 可自建）"}
+    - {name: action, rule: "method + path + 参数，逐字来自 api/endpoints.yaml"}
+    - {name: expected, rule: "含 code（必填）+ data 断言或 message 断言（至少一个）"}
+    - {name: cleanup, rule: "或明确写「无需清理」，并在 side_effects.yaml §3 得到印证"}
+    - {name: category, rule: "属于本文件 required_categories 之一"}
+  forbidden_fields:
+    - "status_code（HTTP 状态码断言）—— 除 /uploads/**"
+    - "绝对计数（除种子基准）"
+
+# ═══════════════════════════════════════════════════════════════
+# 5. AI 检查点
+# ═══════════════════════════════════════════════════════════════
+ai_checklist:
+  - "先读 §1 required_categories 决定要生成哪些类别；**不要全开**"
+  - "边界值一律用 §1 CAT-boundary 的 boundary_table（来自 BizConstants），不要凭常识"
+  - "跨字段规则（CAT-cross-field）**必须覆盖** —— 这是用逐字段思路测不到的"
+  - "生成叠加违规用例前读 rules/validation_order.yaml"
+  - "并发只在这 6 个场景生成，且**只放 pytest**"
+  - "每条用例先扫 §2 excluded_categories，命中就换设计"
+  - "按 §4 检查必备字段完整性，再交给执行器"

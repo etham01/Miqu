@@ -1,0 +1,624 @@
+# Miqu 副作用知识库
+#
+# 用途：回答「**这个写操作连带动了什么**」—— 数据库层与跨表断言的唯一依据。
+#
+# 为什么必须单独成文：
+#   接口测试如果只断言响应体，会漏掉本项目历史上真实出现过的缺陷类型：
+#   **计数与实际关系行数不一致**（并发场景，见 XC-005）。要测出来就必须知道
+#   "关注一个人"实际上动了 3 张表：follow + user.following_count + user.follower_count + notification。
+#
+# 消费者：
+#   LLM               → 补数据库层断言、写 cleanup、判断该用差值还是绝对值
+#   BusinessValidator → 校验用例是否断言了关键副作用
+#   CoverageValidator → 统计副作用覆盖（哪些副作用从没被断言过）
+#   执行器            → 生成 setup / verify / cleanup
+#
+# 真相来源（逐行读取）：
+#   service/impl/*.java（写操作实现）
+#   mapper/*.java（自定义 incr/decr 与批量 UPDATE 的原生 SQL）
+#   entity/*.java（@TableLogic 决定 delete 是逻辑还是物理）
+#   database/schema.sql（列定义与唯一键）
+#
+# confidence: CONFIRMED（删除方式的"逻辑/物理"结论已于 2026-09-17 直接查库验证）
+
+meta:
+  generated_at: 2026-09-17
+  verified_at: 2026-09-17
+  verification_method: >-
+    对 notification / follow 各做一次"产生→撤销"，然后直接 SELECT 该行，
+    看它消失（物理）还是 deleted=1（逻辑）。
+    实测结果：notification 行仍在且 deleted=1（逻辑）；follow 行 count=0（物理）。
+  hard_rule_ref: rules/validation_order.yaml（写入前置校验的顺序）
+
+# ═══════════════════════════════════════════════════════════════
+# 0. 两条贯穿全库的删除语义（最容易写错 SQL 断言的地方）
+# ═══════════════════════════════════════════════════════════════
+delete_semantics:
+  desc: >-
+    **同一个业务动作里，可能同时出现逻辑删除与物理删除。**
+    写 SQL 断言前先查本表，不要按"表里有 deleted 列所以是逻辑删除"来推。
+  physical_delete:
+    entities: [follow, post_like, post_image, admin_operation_log]
+    entity_base: BaseCreateEntity（无 @TableLogic）
+    schema_evidence: "这三张表在 schema.sql 里**没有 deleted 列**"
+    why_it_matters: >-
+      **唯一键会立刻释放**。所以"取消关注/取消点赞后可以立即重新建立"是成立的（FOL-002 / LIKE-002）；
+      若改成逻辑删除，uk_follower_following / uk_post_user 会被软删行占用，
+      重新关注会撞 409 —— 这是 schema.sql 里专门写注释警告过的设计决策。
+    sql_assertion: "该行**已从表里消失**（COUNT = 0），不是 deleted=1"
+  logical_delete:
+    entities: [user, post, comment, message, notification]
+    entity_base: "BaseEntity（带 @TableLogic；application.yml 全局配置 logic-delete-field = deleted）"
+    sql_assertion: "该行**仍在表里**且 deleted = 1；直接 SQL 断言必须显式带 `AND deleted = 0` 才算'有效数据'"
+    api_behavior: "MyBatis-Plus 自动追加 deleted=0，所以 API 侧看不到；查不到 → 404（对应的 *_NOT_FOUND）"
+  no_delete_column:
+    entities: [conversation, report]
+    entity_base: BaseEntityNoDelete
+    note: "既不是逻辑删除也不是物理删除 —— 这两张表**根本没有删除入口**（无 API、无 deleted 列）"
+
+# ═══════════════════════════════════════════════════════════════
+# 1. 逐写操作副作用清单
+# ═══════════════════════════════════════════════════════════════
+#
+# 字段说明：
+#   db_writes      对数据库行的实际改动（表.列，动词）
+#   notifications  连带产生/撤销的通知（本项目的通知是**冗余表**，不是视图）
+#   counters       冗余计数的增减（XC-005：与关系行数是两条独立断言）
+#   admin_log      是否写 admin_operation_log（追加写，无法删除）
+#   idempotent     重复调用是否产生额外副作用
+#   cleanup        测试后能否清理、怎么清理
+#   assertions     建议的最小断言集合（LLM 生成用例时按此补断言）
+operations:
+
+  # ─────────────────────────────────────────────────────────────
+  # 认证域
+  # ─────────────────────────────────────────────────────────────
+  - endpoint: POST_AUTH_REGISTER
+    side_effects:
+      db_writes:
+        - "INSERT user（deleted=0）"
+        - "role=1(USER)、status=1(NORMAL) —— **请求体传 role/status 也不生效**（DTO 无此字段，未知字段静默忽略 SER-06）"
+        - "following_count=0、follower_count=0、post_count=0"
+        - "password 存 BCrypt 哈希（$2a$10$ 前缀），**响应中不返回**"
+        - "email 做 trim + toLowerCase 归一化后才入库（AuthServiceImpl.java:42）"
+      notifications: []
+      counters: []
+      admin_log: false
+      no_side_effects: "不产生关注、不产生动态、不产生通知、不写管理日志"
+    idempotent: false
+    idempotent_note: "第二次同用户名 → 409 USERNAME_EXISTS（先查重，并发下由 uk_username 兜底）"
+    cleanup: "❌ 无法清理（没有删除用户的接口）。这是 pytest 必须用随机用户名的根本原因。"
+    assertions:
+      - "响应 data.id 是**字符串**（XC-002）"
+      - "data.role == 1、data.status == 1、三个计数 == 0"
+      - "响应 JSON 中**不存在** password 字段"
+      - "DB: SELECT role,status,deleted FROM user WHERE username=? → 1,1,0；password LIKE '$2a$10$%'"
+
+  - endpoint: POST_AUTH_LOGIN
+    side_effects:
+      db_writes: []
+      notifications: []
+      counters: []
+      admin_log: false
+      no_side_effects: "**纯读操作**，不改任何行（BCrypt matches 只在内存比对）"
+    idempotent: true
+    cleanup: "无需清理"
+    assertions:
+      - "data.token 是 180 字符左右的 JWT（三段、两个 `.`）—— 不要断言固定值"
+      - "data.tokenType == 'Bearer'、data.expiresIn == 604800（**数字**，不是字符串）"
+
+  - endpoint: POST_AUTH_LOGOUT
+    side_effects:
+      db_writes: []
+      notifications: []
+      counters: []
+      admin_log: false
+      critical: >-
+        **服务端零操作**。JWT 无状态、不维护黑名单，登出后原 Token 在 7 天内**仍然有效**。
+      ai_impact: "🔴 不要生成「登出后旧 Token 应 401」的用例 —— 实际返回 200。"
+    idempotent: true
+    cleanup: "无需清理"
+
+  # ─────────────────────────────────────────────────────────────
+  # 用户域
+  # ─────────────────────────────────────────────────────────────
+  - endpoint: PUT_USERS_ME
+    side_effects:
+      db_writes:
+        - "UPDATE user SET nickname / gender / birthday / bio"
+        - "**null 表示不修改**（MyBatis-Plus updateById 跳过 null 字段）；清空简介要传空字符串 ''"
+        - "username / email / role / status **不可通过本接口修改**（DTO 只有 4 个字段）"
+        - "update_time 由 DB 的 ON UPDATE CURRENT_TIMESTAMP(3) 自动刷新"
+      notifications: []
+      counters: []
+      admin_log: false
+    idempotent: true
+    assertions:
+      - "只传 nickname 时，gender/birthday/bio **保持原值**（不能变成 null）"
+      - "响应中的 username 与修改前一致（USER-001 批量赋值防护）"
+
+  - endpoint: PUT_USERS_ME_PASSWORD
+    side_effects:
+      db_writes: ["UPDATE user SET password = BCrypt(newPassword)"]
+      notifications: []
+      counters: []
+      admin_log: false
+      critical: >-
+        **不会使已签发的旧 Token 失效**（JWT 无状态、无 token_version 字段）。
+        改密码后旧 Token 仍可用 7 天 —— 这是当前实现的已知特性，不是缺陷，但测试不要期望相反行为。
+    idempotent: false
+    idempotent_note: "第二次用同一个 newPassword 会命中 PASSWORD_SAME_AS_OLD(400)"
+    cleanup: "❌ 无恢复密码的接口。→ **必须用 fresh_user**，绝不能用种子账号（改了会污染所有依赖 123456 的用例）。"
+    assertions:
+      - "改完用新密码能登录、用旧密码返回 401 INVALID_CREDENTIALS"
+      - "改密码前签发的 Token 仍然可用（显式断言，防止有人误以为会失效）"
+
+  - endpoint: PUT_USERS_ME_AVATAR
+    side_effects:
+      db_writes: ["UPDATE user SET avatar = <以 /uploads/ 开头的路径>"]
+      notifications: []
+      counters: []
+      admin_log: false
+      note: >-
+        ⚠️ **只校验前缀，不校验文件是否真的存在**（BUG-008，未修，登记为缺口）。
+        所以 PUT 一个指向不存在文件的 /uploads/ 路径**会成功返回 200**。
+        → 想构造"取不到的头像"就用这个特性（浏览器回归的 BUG-006 正是这么造的）。
+    idempotent: true
+    assertions:
+      - "外链（https://…）→ 400 INVALID_IMAGE_URL"
+      - "近似串 /uploads-evil/x.png → 400（前缀校验带尾部斜杠，USER-005）"
+      - "合法 /uploads/... → 200，且响应 data.avatar == 传入值"
+
+  # ─────────────────────────────────────────────────────────────
+  # 关注域
+  # ─────────────────────────────────────────────────────────────
+  - endpoint: POST_USERS_ID_FOLLOW
+    side_effects:
+      db_writes:
+        - "INSERT follow（follower_id=当前用户, following_id=目标）—— **物理行**"
+        - "UPDATE user SET following_count = following_count + 1 WHERE id=当前用户 AND deleted=0"
+        - "UPDATE user SET follower_count  = follower_count  + 1 WHERE id=目标   AND deleted=0"
+        - "INSERT notification(type=1 FOLLOW, user_id=目标, actor_id=当前用户, content='')"
+      notifications:
+        - {type: 1, receiver: 被关注者, actor: 关注者, removed_by: DELETE_USERS_ID_FOLLOW}
+      counters:
+        - {table: user, column: following_count, who: 关注者, delta: +1}
+        - {table: user, column: follower_count, who: 被关注者, delta: +1}
+      admin_log: false
+      counter_sql_note: >-
+        计数的 incr 语句由 UserMapper 硬编码，形如
+        `UPDATE user SET follower_count = follower_count + 1 WHERE id=? AND deleted = 0`。
+        → 若目标用户被**逻辑删除**，该 UPDATE 影响 0 行（静默不报错）。
+    idempotent: false
+    idempotent_note: "第二次 → 409 ALREADY_FOLLOWED（Service 先查；并发下 uk_follower_following 兜底）"
+    cleanup: "✅ 可清理：DELETE /api/users/{id}/follow（物理删除，计数 −1，通知撤回）"
+    assertions:
+      - "响应 data.following == true，data.followerCount == 操作前的 followerCount + 1"
+      - "**两条独立断言**（XC-005）：① API 返回的 followerCount ② follow 表实际行数 = 1"
+      - "被关注者的未读通知数 +1，且该通知 type == 1、actor 是关注者"
+      - "关注者自己的 following_count +1（容易被漏掉的那一半）"
+
+  - endpoint: DELETE_USERS_ID_FOLLOW
+    side_effects:
+      db_writes:
+        - "DELETE FROM follow WHERE follower_id=? AND following_id=? —— **物理删除**"
+        - "UPDATE user SET following_count = GREATEST(following_count - 1, 0) WHERE id=关注者"
+        - "UPDATE user SET follower_count  = GREATEST(follower_count  - 1, 0) WHERE id=被关注者"
+        - "**逻辑删除** notification（UPDATE deleted=1）WHERE user_id=被关注者 AND actor_id=关注者 AND type=1"
+      notifications:
+        - {action: "撤销 type=1 的该条关注通知", delete_kind: logical, visible_effect: "通知列表里消失", sql_effect: "行仍在，deleted=1"}
+      counters:
+        - {table: user, column: following_count, who: 关注者, delta: -1}
+        - {table: user, column: follower_count, who: 被关注者, delta: -1}
+      admin_log: false
+      critical_facts:
+        - "GREATEST(...,0) 保证计数**不会变成负数** —— 断言「减到 0 就停」是这个 SQL 的行为"
+        - "删除 0 行 → 404 NOT_FOLLOWED（不是静默成功）"
+        - "物理删除 → **可以立即重新关注**（可写「取消→重新关注→再取消」的循环用例）"
+    idempotent: false
+    idempotent_note: "第二次 → 404 NOT_FOLLOWED"
+    cleanup: "无需清理（本身就是清理动作）"
+    assertions:
+      - "通知列表里不再有该关注通知（API 层）"
+      - "**SQL 层**：SELECT deleted FROM notification WHERE ... → 行存在且 deleted=1（**不是行消失**）"
+      - "follow 表行数 = 0（物理）"
+      - "两侧计数各 −1"
+
+  # ─────────────────────────────────────────────────────────────
+  # 动态 / 点赞 / 评论域
+  # ─────────────────────────────────────────────────────────────
+  - endpoint: POST_POSTS
+    side_effects:
+      db_writes:
+        - "INSERT post（like_count=0, comment_count=0, image_count=N, deleted=0）"
+        - "INSERT post_image × N（sort_order = 0..N-1，**物理行**）"
+        - "UPDATE user SET post_count = post_count + 1 WHERE id=作者 AND deleted=0"
+        - "**不产生通知**（发动态不通知任何人）"
+      counters:
+        - {table: user, column: post_count, who: 作者, delta: +1}
+      admin_log: false
+      image_order_fact: "post_image.sort_order 从 0 开始递增，读取时按 sort_order ASC → 与传入的 images 顺序一致（可断言）"
+    idempotent: false
+    idempotent_note: "内容完全相同但**每次都是新动态**（没有去重约束）——这是有意的"
+    cleanup: "✅ DELETE /api/posts/{id}（逻辑删除 post，级联见下）"
+    assertions:
+      - "响应 data.images 与传入顺序**完全一致**"
+      - "data.likeCount == 0、data.commentCount == 0、data.liked == false、data.mine == true"
+      - "DB: post_image 行数 == len(images)，sort_order 为 0..N-1 连续且唯一"
+
+  - endpoint: DELETE_POSTS_ID
+    side_effects:
+      db_writes:
+        - "**逻辑删除** post（deleted=1）"
+        - "**逻辑删除**该动态下全部 comment（UPDATE deleted=1）"
+        - "**物理删除** post_image 行"
+        - "**物理删除** post_like 行"
+        - "UPDATE user SET post_count = GREATEST(post_count - 1, 0) WHERE id=作者"
+        - "**逻辑删除** notification（deleted=1）WHERE post_id=? AND type IN (2,3)"
+      counters:
+        - {table: user, column: post_count, who: 作者, delta: -1}
+      admin_log: false
+      admin_route_also_logs: "DELETE /api/admin/posts/{id} 走同一个 Service，**额外**写 admin_operation_log(DELETE_POST)"
+      not_done:
+        - "⚠️ **不删除**指向该动态的 report 行（举报成为指向已删目标的悬空记录，管理端列表显示「（内容已被删除）」）"
+        - "⚠️ **不删除** review/report 的关联；**不递减** comment_count/like_count（post 已删，无意义）"
+        - "⚠️ 磁盘上的图片文件**不删除**（项目无文件清理机制）"
+      permissions: "作者本人 或 管理员（admin 判定靠 CurrentUserHolder.isAdmin()），否则 403 FORBIDDEN"
+    idempotent: false
+    idempotent_note: "第二次 → 404 POST_NOT_FOUND"
+    cleanup: "无需清理"
+    assertions:
+      - "删除后 GET /api/posts/{id} → 404 POST_NOT_FOUND"
+      - "DB: post.deleted=1；comment 全部 deleted=1；post_image 行数=0；post_like 行数=0"
+      - "该动态产生的点赞/评论通知在 API 列表里消失（SQL 层是 deleted=1）"
+
+  - endpoint: POST_POSTS_ID_LIKE
+    side_effects:
+      db_writes:
+        - "INSERT post_like（post_id, user_id）—— 物理行"
+        - "UPDATE post SET like_count = like_count + 1 WHERE id=? AND deleted=0"
+        - "INSERT notification(type=2 LIKE, user_id=动态作者, actor_id=点赞者, post_id=?)"
+      notifications:
+        - {type: 2, receiver: 动态作者, actor: 点赞者, removed_by: DELETE_POSTS_ID_LIKE}
+      counters:
+        - {table: post, column: like_count, delta: +1}
+      admin_log: false
+      self_action_fact: "**点赞自己的动态不产生通知**（NotificationServiceImpl.create 里 receiverId.equals(actorId) 直接 return，NOTI-004）"
+    idempotent: false
+    idempotent_note: "第二次 → 409 ALREADY_LIKED（uk_post_user 兜底）"
+    cleanup: "✅ DELETE /api/posts/{id}/like"
+    assertions:
+      - "data.liked == true，data.likeCount == before + 1"
+      - "作者收到 type=2 通知；**点赞自己时作者不收到通知**"
+      - "并发场景：恰好 1 个成功、post_like 只有 1 行、like_count 只 +1（CONC-004）"
+
+  - endpoint: DELETE_POSTS_ID_LIKE
+    side_effects:
+      db_writes:
+        - "**物理删除** post_like"
+        - "UPDATE post SET like_count = GREATEST(like_count - 1, 0)"
+        - "**逻辑删除** notification（deleted=1）WHERE user_id=作者 AND actor_id=点赞者 AND post_id=? AND type=2"
+      counters:
+        - {table: post, column: like_count, delta: -1}
+      admin_log: false
+      critical: "物理删除 → 可**立即重新点赞**（LIKE-002）；删除 0 行 → 404 NOT_LIKED"
+    idempotent: false
+    cleanup: "无需清理"
+    assertions:
+      - "data.liked == false，data.likeCount == before - 1"
+      - "通知被撤销（API 不可见）"
+      - "重新点赞返回 200（证明唯一键已释放）"
+
+  - endpoint: POST_POSTS_ID_COMMENTS
+    side_effects:
+      db_writes:
+        - "INSERT comment（post_id, user_id, content, parent_id=NULL, reply_to_user_id=NULL, deleted=0）"
+        - "UPDATE post SET comment_count = comment_count + 1"
+        - "INSERT notification(type=3 COMMENT, content=评论内容快照截断至 50 字符)"
+      notifications:
+        - {type: 3, receiver: 动态作者, actor: 评论者, snapshot_field: content, snapshot_max_len: 50}
+      counters:
+        - {table: post, column: comment_count, delta: +1}
+      admin_log: false
+      self_action_fact: "评论自己的动态不产生通知（NOTI-004，同一处实现）"
+      schema_note: "parent_id / reply_to_user_id 是**预留列，一期未实现**（API 无对应参数）→ 不要生成楼中楼用例"
+    idempotent: false
+    idempotent_note: "评论**没有**唯一约束，重复内容会真实产生多条 —— 这是与关注/点赞的关键差异"
+    cleanup: "✅ DELETE /api/comments/{id}"
+    assertions:
+      - "post.commentCount == before + 1"
+      - "作者收到 type=3 通知，**content 是评论内容的截断快照**（≤50 字符）"
+      - "评论自己动态时无通知"
+
+  - endpoint: DELETE_COMMENTS_ID
+    side_effects:
+      db_writes:
+        - "**逻辑删除** comment（deleted=1）"
+        - "UPDATE post SET comment_count = GREATEST(comment_count - 1, 0) —— **仅当该 post 仍存在时**"
+      counters:
+        - {table: post, column: comment_count, delta: -1, condition: "post 未被逻辑删除"}
+      admin_log: false
+      admin_route_also_logs: "DELETE /api/admin/comments/{id} 额外写 admin_operation_log(DELETE_COMMENT)"
+      not_done:
+        - "⚠️ **不撤销**该评论产生的 type=3 通知（通知携带的是内容快照，不依赖评论行是否存在）"
+      condition_reason: >-
+        CommentServiceImpl.java:114-117 先 selectById(postId)，
+        为 null 说明动态已删 → **跳过递减**。否则会去更新一条已逻辑删除的 post（影响 0 行，但语义混乱）。
+    idempotent: false
+    idempotent_note: "第二次 → 404 COMMENT_NOT_FOUND"
+    assertions:
+      - "删除后评论列表不再包含它"
+      - "commentCount −1（**在动态仍存在的前提下**）"
+      - "先删动态再删评论的路径：不能因为 post 查不到而报错"
+
+  # ─────────────────────────────────────────────────────────────
+  # 会话 / 私信域
+  # ─────────────────────────────────────────────────────────────
+  - endpoint: POST_CONVERSATIONS
+    side_effects:
+      db_writes:
+        - "**可能** INSERT conversation：user1_id=min(a,b)、user2_id=max(a,b)、last_message_preview=''、user1_unread=0、user2_unread=0"
+        - "若该对用户已有会话 → **零写入**，直接返回既有会话（幂等返回同一个 id）"
+      notifications: []
+      counters: []
+      admin_log: false
+      order_convention:
+        fact: "user1_id < user2_id 由 CHECK 约束 ck_user_order 强制（schema.sql:157）"
+        consequence: "同一对用户**只有一个**会话，A→B 与 B→A 命中同一条记录（CONV-011 对称性）"
+        ai_impact: "构造数据时顺序写反会被 CHECK 拦下报错；断言时不要假设 conversation.user1 是「发起方」"
+    idempotent: true
+    cleanup: "❌ 无删除会话的接口 → 必须用 fresh_users 保证每轮是新会话"
+    assertions:
+      - "重复调用返回**同一个** conversation id"
+      - "A 打开 B 与 B 打开 A 得到的 id 相同"
+      - "**建了但没发消息的空会话不出现在会话列表里**（list 过滤 last_message_time IS NOT NULL）"
+
+  - endpoint: PUT_CONVERSATIONS_ID_READ
+    side_effects:
+      db_writes:
+        - "UPDATE message SET is_read=1, read_time=now() WHERE conversation_id=? AND receiver_id=当前用户 AND is_read=0 AND deleted=0"
+        - "UPDATE conversation SET user1_unread=0（若当前用户是 user1）**或** user2_unread=0"
+      notifications: []
+      counters:
+        - {table: conversation, column: "user1_unread | user2_unread", who: 当前用户, delta: "清零（不是 -1）"}
+      admin_log: false
+      atomicity_reason: >-
+        两者必须同事务：message.is_read 与 conversation.*_unread 是**同一事实的两种表示**，
+        不同步会出现"角标有未读、点进去却是空的"。
+      permission: "requireMember → 非会话参与者 → 403 NOT_CONVERSATION_MEMBER（**不是** 404）"
+    idempotent: true
+    assertions:
+      - "标记已读后，GET /api/messages/unread-count 的 total **减少的是该会话的未读数**，不是恒减 1"
+      - "会话列表里该会话的 unread == 0"
+      - "**发起方自己**调用标记已读：不发消息的人没有未读，total 不变"
+      - "非参与者 → 403（CONV-012）"
+
+  - endpoint: POST_MESSAGES
+    side_effects:
+      db_writes:
+        - "**可能** INSERT conversation（同 POST_CONVERSATIONS；客户端无需先建会话）"
+        - "INSERT message（conversation_id, sender_id, receiver_id, content, is_read=0, deleted=0）"
+        - "UPDATE conversation SET last_message_id, last_message_preview=内容截断至 100 字符, last_message_time, **仅接收方** unread +1"
+        - "**不产生 notification**（type=4 MESSAGE 是 @Deprecated 保留值，一期不产生）"
+      notifications: []
+      counters:
+        - {table: conversation, column: "接收方那一个 unread 列", delta: "+1（用 IF(user1_id=receiver,1,0) 在一条 SQL 里原子处理）"}
+      admin_log: false
+      atomic_sql: >-
+        ConversationMapper.updateOnNewMessage 一条 UPDATE 同时改
+        last_message_id / preview / time 与**接收方**未读，
+        用 `user1_unread = user1_unread + IF(user1_id = #{receiverId}, 1, 0)` 实现。
+        → 发送方自己的未读**不变**（XM 断言点）。
+      no_trace_on_rejection: >-
+        🔴 **被拒的发送不留任何痕迹**（2026-09-11 冻结规则的显式要求）：
+        互关校验在写库**之前**，所以 403 时不会建会话、不会建消息、不会加未读。
+        用例：test_blocked_send_leaves_no_trace
+    idempotent: false
+    idempotent_note: "发 N 次就有 N 条消息（无去重）"
+    cleanup: "❌ 消息/会话都无法删除 → 只用 fresh_users 互关对做写入"
+    assertions:
+      - "未读数：**接收方 +1、发送方不变**（两个方向都要断）"
+      - "conversation.last_message_preview == content[:100]（超长内容被截断）"
+      - "403 场景后：会话数不变、消息数不变、接收方未读不变（无痕三断言）"
+      - "并发 8 线程发送：消息条数 == 未读数 == 成功数（CONC-006）"
+
+  # ─────────────────────────────────────────────────────────────
+  # 通知域
+  # ─────────────────────────────────────────────────────────────
+  - endpoint: PUT_NOTIFICATIONS_ID_READ
+    side_effects:
+      db_writes: ["UPDATE notification SET is_read=1 WHERE id=?（**已读时不执行 UPDATE，直接 return**）"]
+      notifications: []
+      counters: []
+      admin_log: false
+      idempotency_impl: "NotificationServiceImpl.java:155-157 —— 幂等，不会重复 UPDATE"
+    idempotent: true
+    assertions:
+      - "第二次调用仍返回 200（幂等）"
+      - "别人的通知 → 403 FORBIDDEN（**不是 404**：通知存在但无权操作，SEC-008）"
+      - "不存在的通知 → 404 NOTIFICATION_NOT_FOUND"
+
+  - endpoint: PUT_NOTIFICATIONS_READ_ALL
+    side_effects:
+      db_writes: ["UPDATE notification SET is_read=1 WHERE user_id=当前用户 AND is_read=0（**批量**）"]
+      notifications: []
+      counters: []
+      admin_log: false
+    idempotent: true
+    assertions:
+      - "未读数变为全 0（total/follow/like/comment 四个字段都为 0）"
+      - "**只影响自己的通知** —— 用另一个账号验证其未读未被清零"
+
+  # ─────────────────────────────────────────────────────────────
+  # 举报域
+  # ─────────────────────────────────────────────────────────────
+  - endpoint: POST_REPORTS
+    side_effects:
+      db_writes:
+        - "INSERT report（reporter_id, target_type, target_id, reason_type, reason_detail, status=0 PENDING, handler_id=NULL, handle_time=NULL）"
+      notifications: []
+      counters: []
+      admin_log: false
+      no_side_effects: "**不产生通知、不自动处置**（处置需管理员调 handle 接口）"
+      uniqueness: "(reporter_id, target_type, target_id) 唯一 → 同一人同一目标只能举报一次；**不同人可以举报同一目标**"
+    idempotent: false
+    idempotent_note: "同人重复 → 409 ALREADY_REPORTED（uk_reporter_target 兜底）"
+    cleanup: "❌ 无删除举报的接口；但唯一键含 reporter_id → **换 fresh_user 就等于换一条新记录**"
+    assertions:
+      - "data.targetType / targetId 与请求一致（id 是**字符串**）"
+      - "report.status == 0、handlerId == null（管理端列表里可见）"
+
+  - endpoint: PUT_ADMIN_REPORTS_ID_HANDLE
+    side_effects:
+      db_writes:
+        - "UPDATE report SET status, handler_id=管理员ID, handle_remark, handle_time=now()"
+        - "按 action 级联（**先执行处置，再更新举报**）"
+      cascades:
+        - {action: NONE, effect: "只记结论，不动内容"}
+        - {action: DELETE_POST, effect: "复用 PostServiceImpl.delete → 见 DELETE_POSTS_ID 的全部副作用"}
+        - {action: DELETE_COMMENT, effect: "复用 CommentServiceImpl.delete → 见 DELETE_COMMENTS_ID"}
+        - {action: DISABLE_USER, effect: "user.status=0 → 🔴 **该用户已签发的 Token 立即失效**（每请求查库），后续访问受保护端点返回 423"}
+      notifications: []
+      counters: []
+      admin_log: true
+      admin_log_row:
+        operation_type: HANDLE_REPORT
+        target_type: 4
+        target_id: 举报 ID（**不是举报目标的 ID**）
+        detail_example: "处理举报 #12 → 已处理，处置动作：DELETE_POST"
+      swallowed_errors: >-
+        applyAction 捕获 BizException，**仅当**目标是 POST_NOT_FOUND / COMMENT_NOT_FOUND / USER_NOT_FOUND
+        时吞掉（目标可能已被作者本人删除，举报仍应能结案）；其余异常照常抛出。
+        → 用例：先删动态再处理对应举报 → 200（结案成功）。
+      ordering_note: "状态机约束：只能处理 status=PENDING(0) 的举报，否则 409 REPORT_ALREADY_HANDLED"
+      unreachable_note: "status=2(REJECTED) 且 action != NONE → 400 REJECT_WITH_ACTION_NOT_ALLOWED（在 action/target 匹配校验之前）"
+    idempotent: false
+    idempotent_note: "第二次 → 409 REPORT_ALREADY_HANDLED"
+    cleanup: "无需清理（举报进入终态）"
+    assertions:
+      - "report.status / handlerId / handleTime 已更新"
+      - "DELETE_POST → 目标动态 deleted=1；DISABLE_USER → 目标 user.status=0 且**其旧 Token 立即返回 423**"
+      - "admin_operation_log 多出一行：operation_type=HANDLE_REPORT、target_type=4、target_id=**举报ID**"
+      - "目标已被删时仍能结案（200）"
+
+  # ─────────────────────────────────────────────────────────────
+  # 管理后台
+  # ─────────────────────────────────────────────────────────────
+  - endpoint: PUT_ADMIN_USERS_ID_STATUS
+    side_effects:
+      db_writes:
+        - "UPDATE user SET status = 0|1 WHERE id=目标"
+      notifications: []
+      counters: []
+      admin_log: true
+      admin_log_row:
+        operation_type: "DISABLE_USER（status=0）| ENABLE_USER（status=1）"
+        target_type: 1
+        detail_example: "禁用用户 #15"
+      critical: >-
+        🔴 禁用**立即生效**：JwtAuthenticationFilter 每请求查库校验 status，
+        所以目标用户手里的旧 Token 下一个请求就变成 423 USER_DISABLED（SEC-002 的实现基础）。
+        解禁后旧 Token **恢复可用**（同样因为每请求查库）。
+    idempotent: true
+    idempotent_note: "重复设为同一状态不报错，但**每次都会再写一行 admin_operation_log**（追加写）"
+    cleanup: "✅ 解禁可用同一接口（status=1）。⚠️ 若在测试里禁用了 fresh_user，必须在 finally 里恢复 status=1"
+    assertions:
+      - "禁用后该用户登录 → 423；携带旧 Token 访问受保护端点 → 423（**SEC-002**）"
+      - "禁用后其主页**仍可访问**（requireVisibleUser 不过滤 status，USER-011）"
+      - "admin_operation_log 多一行且 operationType 正确"
+      - "禁用自己被拒（400 CANNOT_OPERATE_SELF，USER-014 的校验顺序）"
+
+  # ─────────────────────────────────────────────────────────────
+  # 文件域
+  # ─────────────────────────────────────────────────────────────
+  - endpoint: POST_FILES_IMAGE
+    side_effects:
+      db_writes: []
+      filesystem_writes:
+        - "写入 <upload.base-dir>/image/yyyy/MM/<32位hex>.<ext>"
+        - "**用 UUID 重命名**，存储文件名与原始文件名无关（含原文件名的路径穿越不可能）"
+        - "扩展名由**文件头魔数**决定（jpg/png/gif/webp），不看上传的后缀名"
+      notifications: []
+      counters: []
+      admin_log: false
+      no_cleanup:
+        critical: "⚠️ 项目**没有删除文件的接口**，也没有清理任务。每跑一次上传测试，uploads/ 下就永久多一个文件。"
+        ai_impact: "不要写「上传后清理临时文件」的 cleanup —— 做不到。断言用返回的 URL，不要关心磁盘累计。"
+      url_pattern: "^/uploads/image/\\d{4}/\\d{2}/[0-9a-f]{32}\\.(jpg|png|gif|webp)$"
+      size_limit: "5MB（BizConstants.MAX_IMAGE_SIZE）；另有 Spring 的 max-file-size 5MB / max-request-size 20MB"
+    idempotent: false
+    idempotent_note: "同样内容上传两次产生两个不同文件（UUID 不同）→ 不能断言 URL 相同"
+    cleanup: "❌ 无法通过 API 清理"
+    assertions:
+      - "data.url 匹配上面的正则（**不要断言固定文件名**）"
+      - "**闭环**：GET 该 url → HTTP 200 且 Content-Type 是 image/*（test_uploaded_file_is_reachable）"
+      - "假后缀（脚本改名 .jpg）→ 400 FILE_TYPE_NOT_ALLOWED（魔数不符）"
+      - "< 12 字节 → 400（魔数检测要求长度 ≥ 12，FILE-013）"
+      - "> 5MB → 400 FILE_TOO_LARGE"
+
+# ═══════════════════════════════════════════════════════════════
+# 2. 跨操作断言纪律
+# ═══════════════════════════════════════════════════════════════
+assertion_discipline:
+  counter_vs_rows:
+    rule: XC-005 —— 冗余计数与实际关系行数永远是**两条独立断言**
+    why: "历史上并发场景出现过两者不一致；只断 API 返回的计数会漏掉"
+    template: |
+      # 关注前后各查一次，两个维度都要断
+      before_followers = get_profile(target)["followerCount"]
+      before_rows = sql("SELECT COUNT(*) FROM follow WHERE following_id = %s", target)
+      resp = client.post(f"/api/users/{target}/follow")
+      assert resp.data["followerCount"] == before_followers + 1        # ① 计数
+      assert sql("SELECT COUNT(*) FROM follow ...") == before_rows + 1  # ② 关系行数
+
+  delta_not_absolute:
+    rule: XC-007 —— pytest 断言用**差值**，不用绝对值
+    sole_exception: "针对**种子数据样本**的绝对值断言（post 1 有 9 张图等，见 data/seed_data.yaml 的 designed_assertion_baselines）"
+    reason: "写入真实落库且多数资源无删除接口，库会随运行次数增长"
+
+  deleted_filter_in_sql:
+    rule: "直接 SQL 断言业务主表时必须显式带 `AND deleted = 0`，否则会把已软删的行也数进来"
+    applies_to: [user, post, comment, message, notification]
+
+  logical_delete_assertion:
+    rule: "断言「某软删操作生效」的正确姿势是 `SELECT deleted FROM ...` 看是否为 1，**不是** COUNT=0"
+    counterexample: "断言 notification COUNT=0 会失败（行还在）"
+
+  counter_floor:
+    rule: "所有 decr 都带 GREATEST(x-1, 0) → 计数**不可能为负**"
+    test_use: "可以放心断言「减到 0 就停」，但更该测的是「不会减到 -1」"
+
+# ═══════════════════════════════════════════════════════════════
+# 3. 清理策略总表（由"有无删除接口"决定）
+# ═══════════════════════════════════════════════════════════════
+cleanup_strategy:
+  desc: >-
+    本项目的 cleanup 策略**不是"用完删除"，而是"用随机数据避免冲突"**。
+    原因是很多资源根本没有删除接口。用错策略会导致"第二次运行撞唯一键"。
+  deletable:
+    - {resource: follow, api: DELETE_USERS_ID_FOLLOW, kind: 物理}
+    - {resource: post_like, api: DELETE_POSTS_ID_LIKE, kind: 物理}
+    - {resource: post, api: DELETE_POSTS_ID, kind: 逻辑}
+    - {resource: comment, api: DELETE_COMMENTS_ID, kind: 逻辑}
+    - {resource: user_status, api: PUT_ADMIN_USERS_ID_STATUS, note: "可恢复 status=1（但 user 本身删不掉）"}
+  not_deletable:
+    - {resource: user, mitigation: "随机用户名（fresh_user 用 uuid.hex[:10]）"}
+    - {resource: conversation, mitigation: "fresh_users 保证每轮新会话"}
+    - {resource: message, mitigation: "同上"}
+    - {resource: report, mitigation: "唯一键含 reporter_id → 换 fresh_user 即换新记录"}
+    - {resource: notification, mitigation: "断言用差值；只有标记已读"}
+    - {resource: admin_operation_log, mitigation: "断言用差值（追加写）"}
+    - {resource: "上传的图片文件", mitigation: "无解；接受磁盘累积（是预期行为）"}
+  idempotency_conclusion: >-
+    正因为多数资源删不掉，pytest 套件被设计为**幂等**：连跑两次结果一致，中途不需重置数据库。
+    两个手段：① 断言用差值；② 写数据一律用随机用户名工厂（fresh_user / fresh_users）。
+
+# ═══════════════════════════════════════════════════════════════
+# 4. AI 使用检查点
+# ═══════════════════════════════════════════════════════════════
+ai_checklist:
+  - "写「删除生效」的 SQL 断言前，先查 §0 确认是逻辑还是物理删除"
+  - "设计写操作用例时，按 operations[].assertions 补齐副作用断言，不要只断响应体"
+  - "计数字段一律做「API 返回的计数」与「关系表行数」两条断言（XC-005）"
+  - "cleanup 前先查 §3：不可删除的资源要用随机数据，不要试图删除"
+  - "需要「能重复执行」的用例，优先选物理删除的实体（follow / post_like）构造循环"

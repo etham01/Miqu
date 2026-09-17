@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { avatarText } from '@/utils/format'
 
 const props = withDefaults(
@@ -12,6 +12,28 @@ const props = withDefaults(
   }>(),
   { size: 40, src: '', nickname: '', userId: null },
 )
+
+/**
+ * 图片是否加载失败。
+ *
+ * {#if src} 只能判断"有没有配头像"，判断不了"这张图能不能取到"——
+ * 外链图床被网络策略拦截、文件被清理、路径失效时，地址非空但内容取不到，
+ * 结果就是一枚永久破图（既不显示首字母占位，也不会自愈）。
+ *
+ * 这里是全站头像的唯一出口（导航栏 / 动态 / 评论 / 私信 / 通知 / 后台共 15 处），
+ * 所以兜底只要做在这一层，全站同时生效。
+ */
+const failed = ref(false)
+
+/** 头像地址变了就重试——否则换成新头像后仍会停留在上一次的失败态。 */
+watch(
+  () => props.src,
+  () => {
+    failed.value = false
+  },
+)
+
+const showImage = computed(() => Boolean(props.src) && !failed.value)
 
 /** 从昵称派生一个稳定的底色，让不同用户的默认头像有区分度。 */
 const fallbackStyle = computed(() => {
@@ -43,13 +65,14 @@ function onClick() {
 
 <template>
   <img
-    v-if="src"
-    :src="src"
+    v-if="showImage"
+    :src="src!"
     :alt="nickname || '头像'"
     class="miqu-avatar"
     :class="{ 'is-clickable': !!userId }"
     :style="boxStyle"
     @click="onClick"
+    @error="failed = true"
   />
   <span
     v-else

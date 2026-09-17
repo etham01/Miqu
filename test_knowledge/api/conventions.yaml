@@ -1,0 +1,285 @@
+# Miqu API 通用约定
+#
+# 用途：所有端点共享的契约。AI 生成任何用例前必须先读本文件，
+#       否则会犯"断言 HTTP 状态码"这类全局性错误。
+# 消费者：LLM（决定断言什么）、Validator（校验认证要求）、执行器（决定带不带 Token）
+#
+# 真相来源：
+#   backend/src/main/java/com/miqu/common/Result.java
+#   backend/src/main/java/com/miqu/common/PageResult.java
+#   backend/src/main/java/com/miqu/config/WebMvcConfig.java
+#   backend/src/main/java/com/miqu/security/AuthInterceptor.java
+#   backend/src/main/java/com/miqu/config/JacksonConfig.java
+#   docs/api/API_CONVENTIONS.md
+# confidence: CONFIRMED（除特别标注）
+
+meta:
+  base_path: /api
+  base_url_default: http://localhost:8081
+  base_url_override: ["--base-url 命令行参数", "MIQU_BASE_URL 环境变量"]
+  port_note: "端口是 8081 而非默认 8080，因本机 8080 被 Windows 服务占用"
+  source: tests/conftest.py:46-51
+  content_type: application/json
+  charset: UTF-8
+  timezone: Asia/Shanghai
+  total_endpoints: 50
+  controller_count: 16
+
+# ─────────────────────────────────────────────
+# 一、统一响应包装
+# ─────────────────────────────────────────────
+result_wrapper:
+  shape:
+    code: {type: int, desc: "业务状态码，与 HTTP 语义对齐", always_present: true}
+    message: {type: string, desc: '成功固定为 "success"；失败为中文文案', always_present: true}
+    data: {type: "T | null", desc: "业务数据；失败时通常为 null", always_present: true}
+  example_success: '{"code":200,"message":"success","data":{...}}'
+  example_failure: '{"code":403,"message":"需要互相关注后才能私聊","data":null}'
+  source: backend/src/main/java/com/miqu/common/Result.java
+  special_case:
+    desc: "健康检查数据库 DOWN 时，code=500 但 data **仍有值**（Result.fail 的三参重载）"
+    source: HealthController + Result.fail(code, msg, data)
+
+page_result:
+  shape:
+    list: {type: array, desc: "当前页数据；**无数据时是 []，不是 null**", nullable: false}
+    total: {type: number, desc: "总记录数（Java long 基本类型 → JSON 数字）"}
+    page: {type: number, desc: "当前页码，从 1 开始"}
+    size: {type: number, desc: "每页条数"}
+    hasNext: {type: boolean, desc: "page * size < total"}
+  source: backend/src/main/java/com/miqu/common/PageResult.java
+  assertion_note: >-
+    list 为空时断言 `data["list"] == []`，不要断言 `data["list"] is None`。
+    total/page/size 是**数字**不是字符串，断言时不要加引号比较。
+
+# ─────────────────────────────────────────────
+# 二、HTTP 状态码约定（最易出错的一条）
+# ─────────────────────────────────────────────
+http_status_policy:
+  rule: "业务接口 /api/** 的 HTTP 状态码**恒为 200**，业务结果只看 body.code"
+  evidence:
+    - "GlobalExceptionHandler 所有 @ExceptionHandler 均返回 Result，无 @ResponseStatus"
+    - "Controller 方法均返回 Result<T>，不设置 ResponseEntity 状态"
+  sole_exception:
+    path: /uploads/**
+    behavior: "静态资源缺失时返回**真正的 HTTP 404**"
+    assertion: "必须用 http_status 断言，不能用 body.code（此时无 JSON 响应体）"
+    source: GlobalExceptionHandler.java:185-196
+    related_test: "tests/api/test_file.py（BUG-007 回归，2026-09-16 补 2 条）"
+  pytest_api:
+    correct: ["response.ok", "response.code == 403", "response.is_conflict"]
+    always_true_useless: "response.status_code == 200"
+    http_only_for_uploads: "response.http_status"
+
+# ─────────────────────────────────────────────
+# 三、序列化约定（决定断言时的类型）
+# ─────────────────────────────────────────────
+serialization:
+  source: backend/src/main/java/com/miqu/config/JacksonConfig.java + docs/api/API_CONVENTIONS.md §7
+  rules:
+    - id: SER-01
+      rule: "包装类型 Long（所有 id 类字段）序列化为**字符串**"
+      example: '{"id":"2"}'
+      assertion: 'data["id"] == "2"（字符串），不是 == 2'
+      reason: "JS Number 精度只有 53 位，Long 直传会丢精度"
+      applies_to: ["UserVO.id", "PostVO.id", "CommentVO.id", "CommentVO.postId",
+                   "MessageVO.id", "MessageVO.conversationId", "MessageVO.senderId",
+                   "MessageVO.receiverId", "NotificationVO.id", "NotificationVO.postId",
+                   "NotificationVO.commentId", "ReportVO.id", "ReportVO.targetId",
+                   "UserProfileVO.id", "UserSearchVO.id", "UserBriefVO.id",
+                   "UserFollowVO.id", "ConversationVO.id", "AdminUserVO.id",
+                   "AdminPostVO.id", "AdminCommentVO.id", "AdminReportVO.id",
+                   "AdminReportVO.targetId", "AdminOperationLogVO.id"]
+
+    - id: SER-02
+      rule: "基本类型 long/int（所有计数类字段）序列化为**数字**"
+      example: '{"total":15,"likeCount":10}'
+      assertion: 'data["total"] == 15（数字）'
+      applies_to: ["PageResult.total/page/size", "NotificationUnreadVO.total/follow/like/comment",
+                   "MessageUnreadVO.total", "AdminStatsVO 全部字段",
+                   "UserVO.followingCount/followerCount/postCount",
+                   "PostVO.likeCount/commentCount", "ConversationVO.unreadCount",
+                   "FollowResultVO.followerCount", "LikeResultVO.likeCount"]
+
+    - id: SER-03
+      rule: "LocalDateTime → yyyy-MM-dd HH:mm:ss"
+      example: '"2026-09-11 10:00:00"'
+      assertion: "字符串比较或正则匹配，不要试图解析为 ISO8601（无 T 分隔符、无时区后缀）"
+
+    - id: SER-04
+      rule: "LocalDate → yyyy-MM-dd"
+      example: '"1998-03-15"'
+
+    - id: SER-05
+      rule: "null 字段**默认输出**（不省略）"
+      assertion: '可用 assert "birthday" in data 判断字段存在'
+
+    - id: SER-06
+      rule: "反序列化时**忽略未知字段**"
+      test_implication: >-
+        请求体里多传一个不存在的字段（如 {"username":"x","hacked":true}）**不会报错**，
+        会被静默忽略。这是 SEC-003（批量赋值防护）的测试基础：
+        多传 role/status 不会报错，但**不会生效**。
+        → 断言应该是"字段未被修改"，而不是"返回 400"。
+
+    - id: SER-07
+      rule: "BaseEntity.deleted 标注 select=false，**永不出现在任何 API 响应中**"
+      test_implication: "不要试图从响应里读 deleted 字段；判断软删除只能通过 API 查不到（404）"
+
+# ─────────────────────────────────────────────
+# 四、认证与授权
+# ─────────────────────────────────────────────
+authentication:
+  scheme: "Bearer JWT"
+  header: "Authorization: Bearer <token>"
+  token_source: "POST /api/auth/login 返回的 data.token"
+  algorithm: HS256
+  expire_seconds: 604800
+  expire_human: "7 天"
+  issuer: miqu
+  secret_min_length: "32 字节（HS256 要求）"
+  source: [application.yml:104-105, config/MiquProperties.java:22,26]
+
+  # 每请求查库：这是 SEC-002 的实现基础，也是"禁用立即生效"的原因
+  per_request_db_check:
+    fact: "JwtAuthenticationFilter 在验签通过后仍会 selectById 查库校验用户存在性与 status"
+    consequence_1: "被禁用账号的**旧 Token 立即失效**，不必等 7 天过期 → 返回 423"
+    consequence_2: "被逻辑删除用户的 Token 立即失效 → 返回 401"
+    consequence_3: "每个受保护请求都有一次 DB 查询，无缓存"
+    source: security/JwtAuthenticationFilter.java:68-69
+
+auth_chain_order:
+  desc: "认证链路的实际执行顺序，决定了'坏 Token 访问白名单接口'的行为"
+  steps:
+    - order: 1
+      component: JwtAuthenticationFilter
+      type: "OncePerRequestFilter（Servlet 层，先于 Interceptor）"
+      responsibility: "**只做身份识别，不做访问控制**"
+      behavior:
+        - "解析 Authorization: Bearer <token>"
+        - "验签 + 校验过期 → 失败则设 request attribute AUTH_ERROR = UNAUTHORIZED"
+        - "selectById 查库 → null 则 AUTH_ERROR = UNAUTHORIZED；status != NORMAL 则 AUTH_ERROR = USER_DISABLED"
+        - "成功 → CurrentUserHolder.set(LoginUser)（ThreadLocal）"
+        - "finally → CurrentUserHolder.clear()"
+    - order: 2
+      component: AuthInterceptor
+      type: "HandlerInterceptor.preHandle，注册路径 /api/**（全覆盖）"
+      responsibility: "访问控制"
+      behavior:
+        - "非 HandlerMethod → 放行"
+        - "@RequireAdmin：currentUser == null → 401（或透传 authError）；!isAdmin → 403"
+        - "不在白名单 && currentUser == null → 401（或透传 authError）"
+        - "其余放行"
+    - order: 3
+      component: Controller
+      behavior: "Bean Validation（@Valid）→ CurrentUserArgumentResolver 注入用户 ID"
+    - order: 4
+      component: Service
+      behavior: "requireActiveUser / requireVisibleUser 闸门 → 业务规则校验"
+
+  critical_facts:
+    - id: AUTHCHAIN-01
+      fact: "策略是**失败关闭**：不在白名单中的 /api/** 一律要求登录"
+      test_implication: "新增端点默认需登录。测试未登录行为必须逐个白名单端点单独设计。"
+    - id: AUTHCHAIN-02
+      fact: "携带**坏 Token** 访问**白名单**接口时，按游客放行，**不报错**"
+      test_implication: >-
+        不要断言"白名单接口 + 坏 Token = 401"。实际是 200，且行为等同未登录。
+        例：GET /api/posts + 坏 Token → 200；GET /api/posts?tab=following + 坏 Token → 401（Service 层拦）。
+      source: security/AuthInterceptor.java:58-62
+    - id: AUTHCHAIN-03
+      fact: "携带**坏 Token** 访问**非白名单**接口 → 401，message 为 UNAUTHORIZED 文案"
+      test_implication: "过期 Token 与伪造 Token 的预期一致，都是 401，无法从响应区分。"
+    - id: AUTHCHAIN-04
+      fact: "/api/users/me **不在白名单**（白名单用 {id:[0-9]+} 而非 {id:*}，刻意排除 me）"
+      test_implication: "未登录访问 /api/users/me → 401，这是 SEC 类必测项"
+
+# 免登录白名单（精确列表，来自 AuthInterceptor + WebMvcConfig）
+auth_whitelist:
+  desc: "以下端点**无需登录**即可访问。列表外的 /api/** 全部要求登录。"
+  entries:
+    - {method: POST, path: /api/auth/register, note: "注册"}
+    - {method: POST, path: /api/auth/login, note: "登录"}
+    - {method: GET,  path: /api/health, note: "健康检查"}
+    - {method: GET,  path: /api/posts, note: "动态流；⚠️ tab=following 时由 Service 层拦 401"}
+    - {method: GET,  path: "/api/posts/{id:[0-9]+}", note: "动态详情；路径参数带正则约束"}
+    - {method: GET,  path: "/api/posts/{id:[0-9]+}/likes", note: "点赞列表"}
+    - {method: GET,  path: "/api/posts/{id:[0-9]+}/comments", note: "评论列表"}
+    - {method: GET,  path: /api/users/search, note: "搜索用户"}
+    - {method: GET,  path: "/api/users/{id:[0-9]+}", note: "用户主页"}
+    - {method: GET,  path: "/api/users/{id:[0-9]+}/posts", note: "某用户动态"}
+    - {method: GET,  path: "/api/users/{id:[0-9]+}/following", note: "某用户关注列表"}
+    - {method: GET,  path: "/api/users/{id:[0-9]+}/followers", note: "某用户粉丝列表"}
+  whitelist_count: 12
+  explicitly_not_whitelisted:
+    - path: /api/users/me
+      reason: "白名单模式是 {id:[0-9]+}，字面 me 不匹配"
+    - path: /api/files/**
+      reason: "上传必须登录"
+    - path: /api/admin/**
+      reason: "不在白名单 + 类级 @RequireAdmin，双重保护"
+    - path: /api/auth/logout
+      reason: "需要登录态才有意义"
+
+require_admin:
+  annotation: "@RequireAdmin"
+  applicable_to: "类或方法"
+  applied_on: "全部 6 个 AdminXxxController（类级）"
+  behavior:
+    not_logged_in: {code: 401, error_code: UNAUTHORIZED}
+    logged_in_non_admin: {code: 403, error_code: FORBIDDEN}
+    logged_in_admin: {code: 200}
+  test_note: >-
+    管理端越权是 SEC 类核心场景：普通用户 Token 访问 11 个管理端点，
+    每个都应返回 403。这是可批量 parametrize 的高价值用例。
+
+# ─────────────────────────────────────────────
+# 五、分页约定
+# ─────────────────────────────────────────────
+pagination:
+  two_styles:
+    - style: offset
+      used_by: "绝大多数列表端点（PageQuery 及其子类）"
+      params:
+        page: {type: Integer, default: 1, min: 1, message: "页码必须大于 0"}
+        size: {type: Integer, default: 10, min: 1, max: 50, message_max: "每页条数不能超过 50"}
+      response: PageResult
+      source: [dto/query/PageQuery.java, common/BizConstants.java:48-50]
+
+    - style: cursor
+      used_by: "仅 GET /api/conversations/{id}/messages（聊天记录向上翻页）"
+      params:
+        beforeId: {type: Long, default: null, min: 1, message: "beforeId 必须大于 0",
+                   desc: "首次不传；之后传上一页最早一条的 id"}
+        size: {type: Integer, default: 20, min: 1, max: 50, message_max: "每页条数不能超过 50"}
+      response: "List<MessageVO>（**裸数组**，不是 PageResult）"
+      source: [dto/query/MessageQuery.java, common/BizConstants.java:51]
+      test_note: >-
+        ⚠️ 这是全项目**唯一**返回列表而非 PageResult 的分页端点。
+        断言时直接对 data 做列表操作，不要写 data["list"]。
+        默认 size 也是 20 而非 10。
+
+  page_query_subclasses:
+    - {class: PostQuery, extra: {tab: {type: String, default: latest, pattern: "latest|following", message: "tab 取值只能是 latest 或 following"}}}
+    - {class: UserSearchQuery, extra: {keyword: {type: String, required: true, max: 32, message_blank: "搜索关键词不能为空", message_max: "搜索关键词不能超过 32 个字符"}}}
+    - {class: NotificationQuery, extra: {type: {min: 1, max: 3, message: "通知类型只能是 1、2 或 3"}, isRead: {min: 0, max: 1, message: "已读状态只能是 0 或 1"}}}
+    - {class: AdminUserQuery, extra: {keyword: {max: 32}, status: {min: 0, max: 1, message: "状态只能是 0 或 1"}}}
+    - {class: AdminPostQuery, extra: {userId: Long, keyword: {max: 32}}}
+    - {class: AdminCommentQuery, extra: {postId: Long, userId: Long, keyword: {max: 32}}}
+    - {class: AdminReportQuery, extra: {status: {min: 0, max: 2, message: "处理状态只能是 0、1 或 2"}}}
+    - {class: AdminLogQuery, extra: {adminId: Long, operationType: String}, note: "无自有校验注解"}
+
+# ─────────────────────────────────────────────
+# 六、静态资源
+# ─────────────────────────────────────────────
+static_resources:
+  url_prefix: /uploads/
+  physical_dir: "uploads/（项目根目录下）"
+  auth_required: false
+  goes_through_auth_interceptor: false
+  reason: "AuthInterceptor 只注册在 /api/**"
+  missing_file_http_status: 404
+  note: >-
+    /uploads/ 前缀是**安全边界**：发帖图片与用户头像都必须以此前缀开头，
+    否则返回 400 INVALID_IMAGE_URL。前缀比较时带尾部 "/"，
+    所以 "/uploads-evil/x.png" 这类近似串会被拒。

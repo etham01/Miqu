@@ -1,0 +1,178 @@
+# Miqu 种子数据事实
+#
+# 用途：告诉 AI「测试前置数据可以用什么」。哪些账号是固定的、能依赖什么绝对值断言、
+#       哪些数据**绝对不能碰**。
+# 消费者：LLM（选 setup 数据）、Validator（校验前置条件可满足）、执行器（生成 setup）
+#
+# 真相来源：database/data.sql（逐行读取）+ tests/conftest.py（种子常量定义）
+# confidence: CONFIRMED
+#
+# ⚠️ 使用前必读：本项目的三条硬纪律之一 ——
+#    **写数据只用当次运行新建的随机用户，不要改种子账号。**
+#    种子账号是 JUnit 绝对值断言的基准，改动会导致大面积失败。
+
+meta:
+  source_file: database/data.sql
+  size: "22.6 KB"
+  all_seed_password: "123456"
+  bcrypt_hash: "$2a$10$Ul.sMNQWzHAcbS0M2SKG7ugp6Gu2LIOZ63EcZkIsABS3E5CLG5bxm"
+  bcrypt_hash_verified_by: "backend/src/test/java/com/miqu/common/SeedPasswordTest.java（守护此哈希确实等于 encode('123456')）"
+  reset_command: |
+    mysql -u root -p < database/schema.sql
+    mysql -u root -p < database/data.sql
+  recompute_note: "data.sql 末尾有统一重算脚本，保证冗余计数与关系表一致"
+
+# ═════════════════════════════════════════════
+# 一、固定账号
+# ═════════════════════════════════════════════
+seed_users:
+  total: 21
+  pytest_constants_source: tests/conftest.py
+
+  # ---- 有 pytest 常量的关键账号（AI 应优先使用这些）----
+  special_accounts:
+    - {id: 1, username: admin, nickname: 系统管理员, role: 2, role_name: ADMIN, status: 1, deleted: 0,
+       pytest_const: SEED_ADMIN, purpose: "管理端全部操作",
+       warning: "**唯一的**管理员账号。不可禁用（CANNOT_OPERATE_SELF 先命中），不可改密码"}
+
+    - {id: 2, username: test001, nickname: 张三, role: 1, role_name: USER, status: 1, deleted: 0,
+       pytest_const: SEED_USER, purpose: "主测试账号，已登录 fixture seed_user_client",
+       known_state: "与 test002(id=3) **互相关注**"}
+
+    - {id: 3, username: test002, nickname: 李四, role: 1, role_name: USER, status: 1, deleted: 0,
+       pytest_const: SEED_USER_2, purpose: "互关对象，fixture seed_user_2_client",
+       known_state: "与 test001(id=2) 互关"}
+
+    - {id: 12, username: banned001, nickname: 被禁用的用户, role: 1, status: 0, status_name: DISABLED, deleted: 0,
+       pytest_const: SEED_BANNED, purpose: "**登录应返回 423**；旧 Token 访问应返回 423",
+       test_uses: ["AUTH-004（禁用登录）", "SEC-002（禁用后 Token 立即失效）",
+                   "USER-010（requireActiveUser 拒绝禁用用户）",
+                   "USER-011（requireVisibleUser 仍允许查看其主页）"]}
+
+    - {id: 13, username: deleted001, nickname: 已注销用户, role: 1, status: 1, deleted: 1,
+       pytest_const: SEED_DELETED, purpose: "**逻辑删除**账号，登录应返回 401，主页应返回 404",
+       note: "status=1（正常）但 deleted=1 → @TableLogic 过滤后查不到 → USER_NOT_FOUND/UNAUTHORIZED"}
+
+  # ---- 普通账号 ----
+  normal_accounts:
+    - {id_range: "4~11", usernames: "test003 ~ test010", nicknames: "王五、赵六、孙七、周八、吴九、郑十、钱一、刘一",
+       role: 1, status: 1, deleted: 0, purpose: "普通用户，批量关注 test001/2/3"}
+    - {id_range: "14~21", usernames: "test011 ~ test018", nicknames: "陈小明 ~ 罗小雨",
+       role: 1, status: 1, deleted: 0, purpose: "批量关注 user 2/3/4，制造粉丝数"}
+
+  account_selection_rules:
+    read_only_use: "只读断言可用种子账号（如 GET /api/users/2）"
+    write_use: "**写操作必须用 fresh_user / fresh_users**，不要用种子账号"
+    forbidden_to_modify:
+      - "改任何种子账号的密码（无恢复接口，改了无法回滚）"
+      - "禁用 admin（会锁死管理端测试）"
+      - "删除种子动态 post 1/2/3（大量绝对值断言依赖它们）"
+      - "改 test001/test002 的关注关系（互关断言依赖）"
+    exception_note: >-
+      禁用 fresh_user 后必须在 finally 里恢复 status=1
+      （项目已有惯例，见 tests/api/test_auth.py:140-161）。
+
+# ═════════════════════════════════════════════
+# 二、种子数据统计与可依赖的断言基准
+# ═════════════════════════════════════════════
+seed_data_stats:
+  users: {count: 21, notable: "id=1 管理员；id=12 禁用；id=13 已注销"}
+  follows: {count: 49, notable: "user 2↔3 互关；user 14~21 各关注 user 2/3/4"}
+  posts: {count: 40}
+  post_likes: {count: 306}
+  comments: {count: 111}
+  conversations: {count: 5, pairs: "(2,3) (2,4) (3,5) (4,6) (5,7)", all_satisfy: "user1_id < user2_id"}
+  messages: {count: "会话1: 10 条；会话 2~5: 各 10 条"}
+  notifications: {count: "23", breakdown: "关注 8 + 点赞 10 + 评论 5", receiver: "user 2"}
+  reports: {count: 5, coverage: "target_type 覆盖 1/2/3；status 覆盖 0/1/2"}
+  admin_operation_logs: {count: 4, types: [DELETE_POST, HANDLE_REPORT, DISABLE_USER]}
+
+# data.sql **有意设计**的断言基准（可写绝对值断言的少数场景）
+designed_assertion_baselines:
+  desc: >-
+    以下是 data.sql 刻意构造的边界样本，是 JUnit 绝对值断言的合法对象。
+    纪律 2 的**唯一例外**：针对种子数据的绝对值断言允许保留。
+  baselines:
+    - {target: "post id=1", fact: "**9 张图片**（数量上限）、10 个赞（user 2~11）、5 条评论（id=1~5，作者 user 3/5/7/9/11）",
+       test_use: "图片数上界、点赞/评论列表分页"}
+    - {target: "post id=2", fact: "**0 张图片**（下界）", test_use: "纯文字动态"}
+    - {target: "post id=3", fact: "**内容恰好 1000 字符**（POST_CONTENT_MAX 上界）",
+       sql: "REPEAT('这是一条用于测试内容长度上限的动态。', 44) + '到此为止恰好一千字符。'",
+       test_use: "长度上界断言、响应截断行为"}
+    - {target: "conversation id=1 (user 2↔3)", fact: "user2_unread=0, user3_unread=2（最后两条未读）",
+       test_use: "未读数与 markRead"}
+    - {target: "conversation id=4 (user 4↔6)", fact: "user1_unread=3（最后 3 条未读）",
+       test_use: "未读数"}
+    - {target: "report 5 条", fact: "status 覆盖 0(待处理)/1(已处理)/2(已驳回)",
+       test_use: "举报状态机；其中 status=1/2 的可直接测 REPORT_ALREADY_HANDLED(409)"}
+  caution: >-
+    ⚠️ 这些绝对值在**手工 curl / 前端操作过之后会失效**。
+    正确处理是**重置数据库**，不是改断言（MIQU_TEST_SYSTEM.md §6 第 4 点）。
+  pytest_vs_junit: >-
+    JUnit 大量依赖上述绝对值（故必须先重置库）；
+    pytest **应以差值为主**，只有明确针对种子样本时才用绝对值。
+
+# ═════════════════════════════════════════════
+# 三、可直接复用的前置数据组合
+# ═════════════════════════════════════════════
+ready_made_fixtures:
+  desc: "以下是种子数据中**已经存在**的关系，AI 无需 setup 即可直接使用（仅限只读断言）"
+  available:
+    - {scenario: 互关用户对, pair: "test001(id=2) ↔ test002(id=3)",
+       can_test: ["读会话列表", "读历史消息", "查 mutual=true", "私信未读数"],
+       cannot_test: ["**发消息**（会污染种子会话的 last_message 与未读数）"]}
+    - {scenario: 已有会话, id: 1, pair: "(2,3)", has_messages: 10, unread: "user3 侧 2 条"}
+    - {scenario: 单向关注, example: "user 14~21 → user 2/3/4（未回关）",
+       can_test: ["followedByMe/followingMe 组合", "非互关不可私信（只读验证）"]}
+    - {scenario: 禁用账号, username: banned001, id: 12, can_test: ["登录 423", "主页仍可访问 200"]}
+    - {scenario: 已注销账号, username: deleted001, id: 13, can_test: ["登录 401", "主页 404"]}
+    - {scenario: 已处理举报, count: "status=1 与 status=2 各有", can_test: ["REPORT_ALREADY_HANDLED(409)"]}
+    - {scenario: 9 图动态, post_id: 1, can_test: ["图片数上界", "点赞列表分页"]}
+
+  must_create_own:
+    desc: "以下场景**没有现成种子数据**，必须用 fresh_user 自建"
+    scenarios:
+      - {scenario: 新的互关对（用于发消息）, reason: "发消息会污染种子会话", how: "fresh_users(2) + 双向关注"}
+      - {scenario: 举报后处置的完整链路, reason: "种子举报已处于终态", how: "fresh_user 发动态 → 另一用户举报 → admin 处置"}
+      - {scenario: 并发竞态, reason: "需要隔离的干净对象", how: "fresh_users + 多线程"}
+      - {scenario: 上传文件, reason: "会真实落盘", how: "fresh_user + 内存构造图片字节"}
+      - {scenario: 改密码, reason: "种子密码不可改", how: "fresh_user"}
+      - {scenario: 删动态/删评论, reason: "不可删种子内容", how: "fresh_user 自建后删"}
+
+# ═════════════════════════════════════════════
+# 四、外部资源依赖
+# ═════════════════════════════════════════════
+external_resources:
+  - {resource: "i.pravatar.cc", usage: "种子用户的 avatar URL 指向该外部图床",
+     mockable: false, failure_mode: "离线时头像为**破图**",
+     is_defect: false, note: "**不影响功能**，已在 MIQU_TEST_SYSTEM.md §9.3 登记为已知非缺陷",
+     test_implication: "浏览器回归中该项曾报 1 个'失败'（11/12），根因是网络策略拦截，非代码问题",
+     related_artifact: ".workbuddy/screenshots/avatar-broken-fallback.png"}
+  - {resource: "本地 uploads/ 目录", usage: "上传文件真实落盘",
+     mockable: false, test_implication: "上传测试会在 uploads/ 下留下真实文件，项目**无清理机制**",
+     note: "跑完多出文件是预期行为，不是缺陷"}
+
+# ═════════════════════════════════════════════
+# 五、无删除接口清单（决定 cleanup 策略）
+# ═════════════════════════════════════════════
+missing_delete_apis:
+  desc: >-
+    以下资源**没有删除接口**，测试创建后无法通过 API 清理。
+    这是本项目 cleanup 策略必须"靠随机命名避免冲突"而非"用完删除"的根本原因。
+  resources:
+    - {resource: user, impact: "**测试用户永久留在库里**", mitigation: "随机用户名（fresh_user 用 uuid.hex[:10]）"}
+    - {resource: conversation, impact: "会话一旦创建无法删除", mitigation: "用 fresh_users 保证每轮是新会话"}
+    - {resource: message, impact: "消息无法删除（deleted 列存在但无撤回 API）", mitigation: "同上"}
+    - {resource: report, impact: "举报无法删除（表无 deleted 列）", mitigation: "唯一键是 (reporter,target_type,target_id)，换 fresh_user 即换 reporter"}
+    - {resource: notification, impact: "通知无法删除（只有标记已读）", mitigation: "断言用差值"}
+    - {resource: admin_operation_log, impact: "日志追加写，无法删除", mitigation: "断言用差值"}
+  deletable_resources:
+    - {resource: post, api: "DELETE /api/posts/{id}（作者或管理员）", note: "逻辑删除"}
+    - {resource: comment, api: "DELETE /api/comments/{id}（作者或管理员）", note: "逻辑删除"}
+    - {resource: post_like, api: "DELETE /api/posts/{id}/like", note: "物理删除"}
+    - {resource: follow, api: "DELETE /api/users/{id}/follow", note: "物理删除"}
+    - {resource: "上传的图片文件", api: "**无删除接口**", note: "落盘后永久保留"}
+  idempotency_conclusion: >-
+    正因为无法清理，pytest 套件被设计为**幂等**：连跑两次结果一致，中途不需重置数据库
+    （2026-09-16 实测 250 passed）。两个手段：① 断言用差值；② 写数据一律用随机用户名工厂。
+    跑完一轮库里多出测试用户，是**预期行为**。

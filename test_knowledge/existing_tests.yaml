@@ -1,0 +1,244 @@
+# 现有测试资产清单
+#
+# 用途：回答两个问题 ——
+#   ① **哪些东西已经被测过了**（避免 AI 生成重复用例）
+#   ② **现有测试用什么方式覆盖的**（新用例应该沿用哪一套）
+#
+# 消费者：
+#   LLM               → 生成前去重；不为已充分覆盖的点重复生成
+#   CoverageValidator → 用本文件算**增量覆盖**（而不是把已有的算成新覆盖）
+#
+# 真相来源：实际执行产物，不是文档转述
+#   pytest  --collect-only -q       实测 250 tests collected（2026-09-17 复测）
+#   JUnit   grep -c "@Test"         实测 291
+#   browser tests/browser_regression.mjs  实测 15 项 assert()
+#   test_cases/check_consistency.py       实测 100 条 / 98 implemented / 2 gap
+#
+# confidence: CONFIRMED
+# verified_at: 2026-09-17
+
+meta:
+  generated_at: 2026-09-17
+  total_automated_cases: 541
+  total_with_browser: 556
+  composition: "JUnit 291 + pytest 250 = 541；再加浏览器回归 15 项断言 = 556"
+  authoritative_numbers_note: >-
+    ⚠️ 旧文档写过「38 个接口 / 518 个用例 / pytest 229」，
+    都是管理后台扩展前或计划态的陈旧数字，**已全部更正**。
+    本文件与 docs/api/README.md §11、docs/testing/TEST_COVERAGE_MATRIX.md 口径一致。
+
+# ═══════════════════════════════════════════════════════════════
+# 1. 四套测试资产总览
+# ═══════════════════════════════════════════════════════════════
+assets:
+  - id: A-JUNIT
+    path: backend/src/test/java/com/miqu/
+    framework: "JUnit 5 + MockMvc + AssertJ"
+    count: 291
+    class_count: 21
+    execution: "进程内，**不发真实 HTTP**；@Transactional 自动回滚"
+    truth_level: 事实来源
+    good_at: "规则密集的分支覆盖；依赖种子绝对值；构造「API 达不到的前置」"
+    run: "bash .workbuddy/tools/mvn.sh test（需先重置数据库）"
+    see: execution/junit_contract.yaml
+
+  - id: A-PYTEST
+    path: tests/
+    framework: "pytest + requests"
+    count: 250
+    file_count: 13
+    execution: "**真实 HTTP + 真实数据库**，写入真实提交不回滚"
+    truth_level: 事实来源
+    good_at: "端到端契约、序列化、过滤器链、并发、文件上传"
+    idempotent: "✅ 连跑两次结果一致，中途不需要重置数据库"
+    run: "cd tests && python -m pytest（先起后端 + 设置 NO_PROXY）"
+    see: execution/pytest_contract.yaml
+
+  - id: A-BROWSER
+    path: tests/browser_regression.mjs
+    framework: "Playwright（真实 Chrome，headless）"
+    count: 15
+    execution: "真实浏览器 + 真实前后端"
+    truth_level: 事实来源
+    good_at: "前端状态一致性（标签与数据同源）、UI 降级"
+    collected_by_pytest: false
+    run: "node tests/browser_regression.mjs（先起后端 8081 + 前端 5173）"
+    see: execution/browser_contract.yaml
+
+  - id: A-YAML
+    path: test_cases/
+    framework: "YAML 设计登记（**不执行**）"
+    count: 100
+    breakdown: "implemented 98 / gap 2"
+    files:
+      - {name: core_business_rules.yaml, entries: 37, content: "冻结的核心业务规则：互关私聊、关注、点赞、会话"}
+      - {name: security_and_concurrency.yaml, entries: 36, content: "认证越权、注入、上传安全、并发竞态、**前端 UI 竞态**"}
+      - {name: api_smoke.yaml, entries: 12, content: "冒烟集合（12 组，对应 pytest -m smoke 的 43 条）"}
+    truth_level: 设计视图
+    validate: "python test_cases/check_consistency.py（退出码 0 = 指针全部指向真实测试函数）"
+    discipline: "**只登记高价值用例**，不与 pytest 1:1 复制 —— 否则等于维护两份真相"
+
+  - id: A-DOCS
+    path: docs/testing/ + docs/api/
+    framework: "Markdown（**不执行**）"
+    truth_level: "说明视图（**有滞后**，见 issues.yaml 的 CONFLICT 段）"
+    key_files:
+      - {path: docs/testing/MIQU_TEST_SYSTEM.md, content: "测试体系总览、运行方式、6 条硬纪律、已知缺口"}
+      - {path: docs/testing/TEST_CASE_SCHEMA.md, content: "用例 YAML 的字段定义与 ID 前缀规则（14 个前缀）"}
+      - {path: docs/testing/TEST_COVERAGE_MATRIX.md, content: "接口/规则 → 用例的覆盖对照"}
+      - {path: docs/testing/TEST_EXECUTION_REPORT.md, content: "最近一次执行结果"}
+      - {path: docs/testing/bug_report.md, content: "Bug Hunt 结论（7 修 + 1 证伪 + 1 待决策）"}
+      - {path: docs/testing/avatar-issue-diagnosis.md, content: "头像问题的完整诊断与修复记录"}
+      - {path: docs/testing/API_DOCUMENT_AUDIT.md, content: "API 文档审计（保留 2026-09-12 原始记录，未回改）"}
+
+# ═══════════════════════════════════════════════════════════════
+# 2. pytest 逐文件清单（250 条，2026-09-17 实测）
+# ═══════════════════════════════════════════════════════════════
+pytest_inventory:
+  verified_by: "pytest --collect-only -q（逐文件统计，合计 250）"
+  files:
+    - {file: api/test_admin.py, count: 53, covers: "后台 11 接口访问控制矩阵 + 统计 + 用户/内容管理 + 举报处置 + 操作日志"}
+    - {file: api/test_auth.py, count: 19, covers: "注册/登录/禁用后 Token 立即失效/退出"}
+    - {file: api/test_user.py, count: 20, covers: "me 系列、资料、改密码、头像（含外链与近似串被拒）、白名单边界"}
+    - {file: api/test_follow.py, count: 19, covers: "关注/取关/重复 409/关注自己 400/禁用 423/注销 404、取消后可重新关注、列表"}
+    - {file: api/test_post.py, count: 31, covers: "发布（含图片顺序）、空内容/超长/超 9 图/外链被拒、列表分页倒序、详情、删除权限、点赞全流程"}
+    - {file: api/test_comment.py, count: 13, covers: "发表、空内容/长度边界、动态不存在、列表正序、删除权限、重复删除 404"}
+    - {file: api/test_message.py, count: 17, covers: "发私信自动建会话、未读数、标记已读、会话对称、幂等打开、空会话不显示、游标分页、非参与者 403"}
+    - {file: api/test_message_mutual_follow.py, count: 14, covers: "**互关私聊规则（发送侧，冻结）**：非互关/单向/解除 403、历史可读、被拒不留痕、校验优先级"}
+    - {file: api/test_conversation_mutual_follow.py, count: 11, covers: "**会话互关规则**：打开/读/标记已读的互关与成员校验、校验优先级"}
+    - {file: api/test_notification.py, count: 16, covers: "关注/点赞/评论各自产生通知、取消时撤回、自操作不通知、单条/全部已读、不能操作他人通知"}
+    - {file: api/test_search.py, count: 15, covers: "昵称/用户名匹配、粉丝数倒序、LIKE 通配符 % _ \\ 转义、关键词校验、followedByMe"}
+    - {file: api/test_file.py, count: 16, covers: "上传安全：4 种格式、URL 可访问闭环、空文件、超 5MB、伪后缀、MIME 不符、极小文件、真图错后缀放行、缺字段/非 multipart、**静态资源真 404 回归**"}
+    - {file: api/test_concurrency.py, count: 6, covers: "重复注册/并发关注/取关/点赞/建会话/发消息 —— 唯一键兜底与计数只 +1"}
+  non_pytest_scripts:
+    - {path: tests/e2e_walkthrough.py, note: "端到端真实链路走查，**不参与 pytest 收集**"}
+    - {path: tests/browser_check.mjs, note: "页面走查（控制台报错 + 未捕获异常）"}
+    - {path: tests/browser_regression.mjs, note: "15 项状态一致性断言"}
+    - {path: tests/perf/users.csv, note: "性能测试用的用户样本（脚本本身在 docs/testing/PERFORMANCE_TEST_PLAN.md 里描述，未实现）"}
+
+# ═══════════════════════════════════════════════════════════════
+# 3. JUnit 逐类清单（291 条）
+# ═══════════════════════════════════════════════════════════════
+junit_inventory:
+  verified_by: "grep -c '@Test' backend/src/test/**/*.java"
+  classes:
+    - {class: "auth/AuthControllerTest", count: 19}
+    - {class: "user/UserControllerTest", count: 20}
+    - {class: "user/UserSearchTest", count: 16}
+    - {class: "follow/FollowControllerTest", count: 26}
+    - {class: "post/PostControllerTest", count: 31}
+    - {class: "post/PostLikeControllerTest", count: 12}
+    - {class: "comment/CommentControllerTest", count: 20}
+    - {class: "message/ConversationControllerTest", count: 22}
+    - {class: "message/MessageControllerTest", count: 17}
+    - {class: "notification/NotificationControllerTest", count: 19}
+    - {class: "report/ReportControllerTest", count: 13}
+    - {class: "admin/AdminAccessControlTest", count: 4}
+    - {class: "admin/AdminUserControllerTest", count: 14}
+    - {class: "admin/AdminContentControllerTest", count: 13}
+    - {class: "admin/AdminReportControllerTest", count: 18}
+    - {class: "admin/AdminStatsControllerTest", count: 9}
+    - {class: "common/ResponseSerializationTest", count: 6}
+    - {class: "common/EntitySchemaConsistencyTest", count: 2}
+    - {class: "common/SeedPasswordTest", count: 2}
+    - {class: "controller/HealthControllerTest", count: 4}
+    - {class: "MiquApplicationTests", count: 4}
+
+# ═══════════════════════════════════════════════════════════════
+# 4. 端点级覆盖（50 个端点）
+# ═══════════════════════════════════════════════════════════════
+endpoint_coverage:
+  summary:
+    pytest_direct: 45
+    pytest_indirect: 1
+    pytest_uncovered: 4
+    junit_covers_the_uncovered: true
+    note: "「未覆盖」指 **pytest 未直接断言**；这 4 个都有 JUnit 断言，所以整体**并非无覆盖**"
+  uncovered_by_pytest:
+    - {endpoint: GET_HEALTH, pytest: "⚠️ 仅前置探测（conftest.ensure_backend_running 用它判断后端可跑）", junit: "✅ HealthControllerTest（4）"}
+    - {endpoint: GET_POSTS_ID_LIKES, pytest: "❌ 从未被调用", junit: "✅ PostLikeControllerTest（12）"}
+    - {endpoint: GET_USERS_ID_FOLLOWING, pytest: "❌ 只测了 /me/following", junit: "✅ FollowControllerTest（26）"}
+    - {endpoint: GET_USERS_ID_FOLLOWERS, pytest: "❌ 只测了 /me/followers", junit: "✅ FollowControllerTest（26）"}
+  indirect:
+    - {endpoint: POST_REPORTS, pytest: "⚠️ 只当后台场景的前置数据创建，未断言用户侧异常契约", junit: "✅ ReportControllerTest（13）"}
+  history:
+    - "2026-09-12 审计时 POST_FILES_IMAGE 是**唯一零自动化覆盖**的接口 —— 现已被 api/test_file.py（16 条）覆盖"
+
+# ═══════════════════════════════════════════════════════════════
+# 5. 增量覆盖机会（AI 应该优先补什么）
+# ═══════════════════════════════════════════════════════════════
+incremental_opportunities:
+  desc: >-
+    这些是**现有测试明确没有覆盖**的点。生成新用例时优先从这里选 ——
+    这比"再写一遍已覆盖的路径"有价值得多。
+  items:
+    - id: IO-01
+      gap: "管理后台 4 个**写**接口没有矩阵式的访问控制断言"
+      detail: "test_admin.py 的 ADMIN_ENDPOINTS 只含 7 个 GET；4 个写接口（PUT users/{id}/status、DELETE posts/{id}、DELETE comments/{id}、PUT reports/{id}/handle）缺「未登录 401 / 非管理员 403」"
+      suggested: "pytest：4 × 2 = 8 条"
+      value: 高
+      registered: docs/api/README.md §11.3
+
+    - id: IO-02
+      gap: "pytest 未直接断言 4 个端点"
+      detail: "GET /api/health、GET /api/posts/{id}/likes、GET /api/users/{id}/following、GET /api/users/{id}/followers"
+      suggested: "pytest：为这 4 个补直接断言（含游客可访问、分页、followedByMe 回填）"
+      value: 中
+      note: "这 4 个有 JUnit 覆盖，属「口径补齐」而非「能力补齐」"
+
+    - id: IO-03
+      gap: "POST /api/reports 的用户侧异常契约未被 pytest 断言"
+      detail: "只被当后台场景的前置数据创建；CANNOT_REPORT_SELF / ALREADY_REPORTED / 目标不存在 的 HTTP 契约只在 JUnit"
+      suggested: "pytest：3~5 条用户侧负向用例"
+      value: 中
+
+    - id: IO-04
+      gap: "「不能禁用另一个管理员」(CANNOT_DISABLE_ADMIN) HTTP 层不可达"
+      detail: "种子只有 1 个管理员 → 无输入可触达（SEC-004 缺口）"
+      suggested: "补第二个管理员种子账号，或写直接调 Service 的集成测试"
+      value: 中
+      blocking: "需要先改种子数据，属**决策项**，不要擅自改"
+
+    - id: IO-05
+      gap: "数十线程同一瞬间首建会话未压测"
+      detail: "只验证到 8 线程（CONC-007 缺口）"
+      suggested: "压测脚本，属性能范畴"
+      value: 低
+      reason: "当前 8 线程已验证唯一键兜底正确"
+
+    - id: IO-06
+      gap: "前端无单元/组件测试"
+      detail: "项目未引入 Vitest/Jest"
+      suggested: "不补 —— 这是**有意的取舍**，前端状态层用 browser_regression.mjs 兜"
+      value: 不适用
+      registered: issues.yaml M-03
+
+# ═══════════════════════════════════════════════════════════════
+# 6. 最近一次执行结果（生成前先确认基线是绿的）
+# ═══════════════════════════════════════════════════════════════
+last_execution:
+  date: 2026-09-16
+  pytest: "250 collected / 250 passed / 0 failed"
+  junit: "291 run / 0 failures / 0 errors"
+  browser: "15 项断言 / 15 PASS"
+  frontend_build: "vue-tsc 0 error；vite build 成功"
+  consistency: "test_cases/check_consistency.py exit 0（100 条 / 98 implemented / 2 gap）"
+  known_dependency: >-
+    JUnit 依赖种子数据绝对值 → 跑之前必须先重置数据库；
+    pytest 幂等 → 不需要重置。
+
+# ═══════════════════════════════════════════════════════════════
+# 7. 去重规则（AI 生成前必读）
+# ═══════════════════════════════════════════════════════════════
+dedup_rules:
+  - "生成前先在本文件的逐文件清单里找目标端点/规则 → 若已被充分覆盖，**不要重复生成**"
+  - "同一规则在 JUnit 与 pytest **都有**覆盖是**正常**的（分工不同），不算重复："
+  - "     JUnit 覆盖「分支」；pytest 覆盖「端到端契约」。两者都保留。"
+  - "真正要避免的重复是：在同一框架里再写一条**断言与前置完全相同**的用例"
+  - "生成后回填本文件的 count 与 last_execution（数字是活的，不是文档装饰）"
+
+ai_checklist:
+  - "先查 §5 incremental_opportunities 找空白，再考虑已在覆盖的目标"
+  - "判断新用例属于哪套资产：见 execution/junit_contract.yaml §8 when_to_use"
+  - "不要把测试数据数字硬编码进用例（HR-02）"
+  - "不要为 §5 IO-04/IO-06 这类**决策项/有意取舍**生成用例 —— 先确认"

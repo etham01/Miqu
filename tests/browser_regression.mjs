@@ -1,14 +1,20 @@
 /**
  * Miqu 前端状态一致性回归（真实 Chrome）。
  *
- * 覆盖本次 Bug Hunt 定位到的「筛选条件变更 / 请求被吞」缺陷族，
- * 以及 BUG-001（取消关注后关注流是否残留）的固定回归。
+ * 覆盖两类只有真实浏览器才能验证的问题：
  *
- * 为什么是浏览器脚本而不是 pytest：
- *   pytest 打的是 HTTP，只能证明后端返回正确；本缺陷族发生在**前端状态层**——
- *   后端每次都对，是前端没有把新条件下发出去。项目未引入前端测试框架
- *   （见 tests/README.md「已知覆盖缺口」），因此与 browser_check.mjs 同属
- *   可选的真实浏览器走查工具，不进 pytest 收集。
+ *   A. 「筛选条件变更 / 请求被吞」缺陷族（BUG-002/003/004）
+ *      后端每次返回都是对的，错在前端没把新请求发出去 —— pytest 打 HTTP 看不见。
+ *   B. 「图片加载失败的降级」（BUG-006）
+ *      头像取不到时必须退回首字母占位，而不是留一枚永久破图。
+ *
+ * 另有 BUG-001（取消关注后关注流是否残留）的固定回归守卫 —— 它本就是预期行为，
+ * 登记它是为了防止将来被改坏。
+ *
+ * 为什么是浏览器脚本而不是 pytest：见 `tests/README.md`「已知覆盖缺口」，
+ * 项目未引入前端测试框架，前端状态层靠本脚本与 browser_check.mjs 兜。
+ * 它**不进 pytest 收集**（pytest.ini 的 testpaths=api 只收 test_*.py），
+ * 所以它红不会污染 pytest 的绿灯。
  *
  * 约定：进入用例前，请求会被人为放慢，以稳定复现"还在飞就点了下一个筛选条件"的窗口。
  *
@@ -97,7 +103,7 @@ async function loggedInPage(browser, user, reqs, slowMatch) {
 
 async function main() {
   console.log('='.repeat(72))
-  console.log('Miqu 前端状态一致性回归')
+  console.log('Miqu 前端回归（状态一致性 + 图片降级）')
   console.log(`后端 ${API}   前端 ${WEB}   人为延迟 ${SLOW_MS}ms`)
   console.log('='.repeat(72))
 
@@ -263,6 +269,51 @@ async function main() {
     const onlyLikes = state.items.length > 0 && state.items.every((t) => t && t.includes('赞了你的动态'))
     assert('BUG-004.b', '高亮「点赞」时列表只含点赞通知', onlyLikes,
       `列表 ${state.items.length} 条：${state.items.join(' / ')}`)
+    await ctx.close()
+  }
+
+  /* ---------------------------------------------------------------
+     BUG-006：头像取不到时必须降级为首字母占位，而不是永久破图
+     --------------------------------------------------------------- */
+  console.log('\n[BUG-006] 头像加载失败 → 降级为首字母占位')
+  {
+    const victim = await newUser('rf')
+    // 造一个「前缀合法、但磁盘上不存在」的头像：接口会接受（不受 BUG-005 的前缀校验阻挡），
+    // 但请求它会拿到 404 → 正是触发 <img> 加载失败的路径。
+    const missing = '/uploads/image/2026/09/definitely-not-exist.png'
+    const put = await api('PUT', '/api/users/me/avatar', { token: victim.token, body: { avatar: missing } })
+    assert('BUG-006.a', '造出一个指向不存在文件的头像', put.code === 200, `code=${put.code}`)
+
+    const ctx = await browser.newContext()
+    await ctx.addInitScript(
+      ([t, u]) => {
+        localStorage.setItem('miqu_version', '1')
+        localStorage.setItem('miqu_token', t)
+        localStorage.setItem('miqu_user', u)
+      },
+      [victim.token, JSON.stringify(victim.user)],
+    )
+    const page = await ctx.newPage()
+    await page.goto(`${WEB}/users/${victim.id}`, { waitUntil: 'networkidle' })
+    await page.waitForTimeout(2500)
+
+    const avatars = await page.evaluate(() =>
+      [...document.querySelectorAll('.miqu-avatar')].map((el) => ({
+        tag: el.tagName,
+        naturalWidth: el.naturalWidth ?? null,
+        complete: el.complete ?? null,
+        text: (el.textContent || '').trim(),
+      })),
+    )
+    const broken = avatars.filter((a) => a.tag === 'IMG' && a.complete && a.naturalWidth === 0)
+    const fallback = avatars.filter((a) => a.tag === 'SPAN')
+
+    assert('BUG-006.b', '页面上不再有解码失败的 <img> 头像', broken.length === 0,
+      `破图 ${broken.length} 个 / 共 ${avatars.length} 个头像位`)
+    assert('BUG-006.c', '取不到的头像降级成了首字母占位', fallback.length > 0,
+      `占位 span ${fallback.length} 个；文本=${fallback.map((f) => f.text).join(',') || '(无)'}`)
+
+    await page.screenshot({ path: '.workbuddy/screenshots/bug006-avatar-fallback.png', fullPage: true })
     await ctx.close()
   }
 

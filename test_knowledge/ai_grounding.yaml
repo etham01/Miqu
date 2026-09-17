@@ -1,0 +1,338 @@
+# AI Grounding —— 事实边界
+#
+# 用途：回答「**AI 能用什么事实、禁止假设什么**」。
+#       这是"防幻觉"的正面清单 + 反面清单，是整个知识库对 LLM 最硬的一层约束。
+#
+# 为什么必须单独成文：
+#   LLM 面对"社交应用"这个领域会本能地补全常识：
+#   以为有"版主"角色、以为 logout 会让 Token 失效、以为点赞要防重复、
+#   以为错误码叫 USERNAME_ALREADY_EXISTS。
+#   这些"合理但错误"的补全，正是本项目纪律里最想拦掉的东西。
+#
+# 消费者：
+#   LLM               → 生成前的硬约束（不得越界）
+#   BusinessValidator → Forbidden 清单**直接就是校验规则**
+#   Pydantic          → allowed_facts 里的枚举用作 schema 的 Literal 取值
+#
+# 真相来源：全部来自本知识库其它文件；本文件只做"允许/禁止"的收敛表达
+# confidence: CONFIRMED
+# verified_at: 2026-09-17
+
+meta:
+  generated_at: 2026-09-17
+  purpose: "让 AI 不再根据常识猜测本项目应该怎么测，而是依据真实事实"
+  enforcement: >-
+    forbidden_assumptions 中的每一项都是**硬约束**：
+    生成的用例若命中任一项，BusinessValidator 应判不通过并要求重生成，
+    而不是"提醒一下"。
+  priority_order: "真实性 > 可追溯性 > 可验证性 > 可执行性 > 覆盖率 > 文档数量"
+
+# ═══════════════════════════════════════════════════════════════
+# 1. ALLOWED FACTS（AI 只能使用这些）
+# ═══════════════════════════════════════════════════════════════
+allowed_facts:
+  desc: >-
+    **只能使用本清单及本知识库其它文件中列出的事实。**
+    清单之外的一律视为不存在 —— 需要时先去源码确认并登记进知识库，再来生成。
+  source_of_truth:
+    apis: api/endpoints.yaml
+    error_codes: api/error_codes.yaml
+    conventions: api/conventions.yaml
+    entity_and_fields: data/data_model.yaml
+    seed_data: data/seed_data.yaml
+    field_values: data/test_data.yaml
+    rules: rules/business_rules.yaml
+    validation_order: rules/validation_order.yaml
+    side_effects: rules/side_effects.yaml
+    permissions: permissions/permission_matrix.yaml
+    states: states/state_machines.yaml
+    workflows: workflows/workflows.yaml
+    test_assets: existing_tests.yaml
+    policy: test_policy.yaml
+    coverage: coverage_matrix.yaml
+    known_issues: issues.yaml
+
+  endpoints:
+    count: 50
+    ids: "见 api/endpoints.yaml（每个模块的 endpoints[].id）"
+    rule: "只能调用这 50 个端点；method + path 必须逐字一致"
+    whitelist_count: 12
+
+  roles:
+    count: 2
+    values: [{code: 1, name: USER}, {code: 2, name: ADMIN}]
+    rule: "只有这两个角色。种子中**只有 1 个管理员**（admin, id=1）"
+
+  error_codes:
+    count: 42
+    rule: "只能断言 api/error_codes.yaml 中存在的错误码名与文案"
+    reachable_subset_rule: "⚠️ 存在 ≠ 可达。断言前先查 rules/validation_order.yaml §4 死分支清单"
+
+  business_rules:
+    count_structured: 86
+    count_mentioned: 92
+    domains: [AUTH, USER, POST, LIKE, CMT, NOTI, FOL, CONV, MSG, RPT, FILE, SEC, CONC, SMK, XC]
+    rule: "只能引用这些规则 ID；每个 ID 都必须能在 business_rules.yaml / test_cases/*.yaml / 本知识库中命中"
+
+  states:
+    enums: 8
+    rule: "状态取值只能来自 states/state_machines.yaml 的 enums 段"
+
+  test_accounts:
+    seed: 21
+    special: [admin(id=1), test001(id=2), test002(id=3), banned001(id=12), deleted001(id=13)]
+    rule: "写数据只能用 fresh_user / fresh_users（随机用户名）"
+
+  http_conventions:
+    - "HTTP 状态码恒为 200（业务结果看 body.code）"
+    - "唯一例外：/uploads/** 缺失返回真 HTTP 404"
+    - "id 类字段序列化为**字符串**"
+    - "计数类字段序列化为**数字**"
+
+  boundaries:
+    rule: "长度/范围边界只能取 data/data_model.yaml → boundary_constants 中的值（来自 BizConstants.java）"
+
+# ═══════════════════════════════════════════════════════════════
+# 2. FORBIDDEN ASSUMPTIONS（AI 禁止自行假设）
+# ═══════════════════════════════════════════════════════════════
+forbidden_assumptions:
+  desc: >-
+    每一项都对应本项目里一个**真实存在的"常识陷阱"**。
+    括号里是这个常识在别处可能成立、但**在本项目不成立**的原因。
+  items:
+
+    # ---------- 认证 / 会话 ----------
+    - id: FA-01
+      forbidden: "假设 logout 会让 Token 失效"
+      reality: "JWT 无状态，logout **服务端零操作**；原 Token 在 7 天内仍有效"
+      correct: "只有「禁用账号」与「逻辑删除账号」能让旧 Token 失效"
+      ref: AUTH-007
+
+    - id: FA-02
+      forbidden: "假设改密码会让已签发的 Token 失效"
+      reality: "无 token_version 字段，改密码**不影响**旧 Token"
+      ref: USER-003
+
+    - id: FA-03
+      forbidden: "假设「用户不存在」与「密码错误」返回不同错误码"
+      reality: "两者**故意合并**为同一个 401 INVALID_CREDENTIALS，防账号枚举"
+      ref: AUTH-003
+
+    - id: FA-04
+      forbidden: "假设被禁用账号登录一定返回 423"
+      reality: "凭证错误时返回 **401**（密码校验先于状态校验）"
+      correct: "只有凭证正确 + status=0 才是 423"
+      ref: AUTH-005
+
+    - id: FA-05
+      forbidden: "假设可以撤销/登出/吊销 Token"
+      reality: "项目**没有**任何 Token 吊销机制"
+
+    - id: FA-06
+      forbidden: "假设存在 refresh token / token 续期接口"
+      reality: "只有 login 返回一个 7 天有效的 access token"
+
+    # ---------- 角色 / 权限 ----------
+    - id: FA-07
+      forbidden: "创造不存在的角色（版主 moderator / 超级管理员 / VIP / 普通管理员）"
+      reality: "只有 USER(1) 与 ADMIN(2)"
+
+    - id: FA-08
+      forbidden: "假设可以只禁言不禁号"
+      reality: "只有整账号的 status=0（禁用），没有禁言概念"
+
+    - id: FA-09
+      forbidden: "假设普通用户可以访问任何 /api/admin/** 端点"
+      reality: "@RequireAdmin 标注在 6 个 Admin*Controller 的**类**上，全部方法都要管理员"
+
+    - id: FA-10
+      forbidden: "假设「删除他人内容」返回 404（为了隐藏资源存在性）"
+      reality: "存在但无权 → **403 FORBIDDEN**；不存在 → 404。项目明确区分两者且有成对用例"
+
+    - id: FA-11
+      forbidden: "假设非会话成员读会话返回 404"
+      reality: "返回 **403 NOT_CONVERSATION_MEMBER**（不是通用 FORBIDDEN，也不是 404）"
+
+    - id: FA-12
+      forbidden: "假设管理员可以操作他人的通知"
+      reality: "通知端点没有 @RequireAdmin，校验只看 notification.user_id == currentUserId；管理员操作他人通知也是 403"
+
+    # ---------- API / 参数 ----------
+    - id: FA-13
+      forbidden: "发明不存在于 api/endpoints.yaml 的端点"
+      examples: ["POST /api/admin/maintenance/rebuild-counts（design.md 里的**设计建议**，代码中不存在）",
+                 "GET /api/users/{id}/likes（用户点赞列表，不存在）",
+                 "PUT /api/messages/{id}/recall（撤回，不存在）"]
+
+    - id: FA-14
+      forbidden: "发明不存在的请求参数名"
+      examples: ["client 传 role/status 想提权（DTO 无此字段，静默忽略，SER-06）",
+                 "评论传 parentId（DTO 无此字段，静默忽略）",
+                 "分页用 offset/limit（本项目是 page/size）"]
+
+    - id: FA-15
+      forbidden: "假设注册时可以指定 role 或 status"
+      reality: "RegisterRequest 无这两个字段；服务端恒定 role=1、status=1"
+
+    - id: FA-16
+      forbidden: "假设有「用户列表」公开接口"
+      reality: "只有 GET /api/users/search（需 keyword）；没有无参用户列表"
+
+    - id: FA-17
+      forbidden: "假设分页参数越界会报错"
+      reality: "size 超过 50 会被**钳到 50**，不报错"
+
+    # ---------- 数据 / 状态 ----------
+    - id: FA-18
+      forbidden: "发明数据库里不存在的字段或表"
+      reality: "11 张表，字段清单见 data/data_model.yaml；改字段必先核对 schema.sql"
+
+    - id: FA-19
+      forbidden: "假设状态可以来回切换"
+      reality: "多数状态**单向且无回退接口**：通知已读、消息已读、动态/评论删除、账号注销、举报终态"
+      correct: "只有 user.status 与 follow / post_like 关系可逆"
+
+    - id: FA-20
+      forbidden: "假设通知的「删除」是物理删除"
+      reality: "notification 有 deleted 列 → 撤回是**逻辑删除**（行仍在，deleted=1）"
+      contrast: "follow / post_like / post_image 才是物理删除"
+      ref: XC-003, XC-004
+
+    - id: FA-21
+      forbidden: "假设 relationship 表是软删除"
+      reality: "follow / post_like / post_image **没有 deleted 列**，取消即物理删除 —— 这是有意设计，为了释放唯一键"
+
+    - id: FA-22
+      forbidden: "假设存在 conversation 的删除接口 / message 的撤回接口 / 举报的删除接口 / 用户的删除接口"
+      reality: "这四者都**没有删除入口**，测试只能用随机数据避免冲突"
+
+    - id: FA-23
+      forbidden: "假设楼中楼/回复评论功能存在"
+      reality: "comment.parent_id 是预留列，API 完全不暴露"
+
+    - id: FA-24
+      forbidden: "假设私信会产生 notification（type=4）"
+      reality: "MESSAGE 类型是 @Deprecated 保留值，一期**不产生**"
+
+    - id: FA-25
+      forbidden: "假设「删除动态」会连带删除指向它的举报"
+      reality: "report 行**保留**，管理端列表显示「（内容已被删除）」"
+
+    # ---------- 错误码 ----------
+    - id: FA-26
+      forbidden: "发明错误码名（如 USERNAME_ALREADY_EXISTS / USER_NOT_EXIST / PASSWORD_WRONG）"
+      reality: "只能用 api/error_codes.yaml 中的 42 个名字"
+
+    - id: FA-27
+      forbidden: "断言 EMPTY_COMMENT 这个错误码"
+      reality: "它是**死枚举**（全库无引用）；空评论实际返回 400 PARAM_INVALID + 「评论内容不能为空」"
+
+    - id: FA-28
+      forbidden: "断言 targetType=4 会返回 INVALID_TARGET_TYPE"
+      reality: "@Max(3) 在参数层先拦为 400 PARAM_INVALID；Service 分支不可达"
+
+    - id: FA-29
+      forbidden: "断言参数校验失败的 message 是「参数校验失败」"
+      reality: "GlobalExceptionHandler 用具体字段文案替换它"
+
+    - id: FA-30
+      forbidden: "断言 500 作为预期结果"
+      reality: "除 FILE-015 的路径穿越分支（有意返回 500 + 「非法的存储路径」）外，业务用例不应出现 500"
+
+    # ---------- 测试执行 ----------
+    - id: FA-31
+      forbidden: "断言 HTTP 状态码"
+      reality: "恒 200；除 /uploads/** 用 http_status 断言真 404"
+      ref: XC-001
+
+    - id: FA-32
+      forbidden: "使用绝对计数断言（== 21）"
+      reality: "库随运行增长；只用差值（种子基准是唯一例外）"
+      ref: XC-007
+
+    - id: FA-33
+      forbidden: "假设存在数据库直连夹具 / mock 夹具 / reset 夹具"
+      reality: "pytest 夹具只有 conftest.py 里那 9 个；SQL 断言要自己连库"
+
+    - id: FA-34
+      forbidden: "假设部分数量是 DTO 里必填的"
+      reality: "PostCreateRequest 里 content 与 images **都不是必填**，约束是跨字段规则（二者不能同时为空）"
+
+    - id: FA-35
+      forbidden: "假设评论重复内容会 409"
+      reality: "comment 表**没有唯一约束**，重复内容是合法操作（与关注/点赞不同）"
+
+    - id: FA-36
+      forbidden: "假设禁用用户后其主页会 404"
+      reality: "requireVisibleUser **不检查 status** —— 禁用用户主页仍返回 200"
+
+    - id: FA-37
+      forbidden: "假设「已逻辑删除的账号」访问受保护端点会 404"
+      reality: "拦截器先给 **401**（不是 404）；404 只在「以它为操作目标」时出现"
+
+    - id: FA-38
+      forbidden: "假设白名单端点携带坏 Token 会报错"
+      reality: "白名单命中时坏 Token 被**静默忽略**，按游客放行返回 200"
+
+# ═══════════════════════════════════════════════════════════════
+# 3. CONFIDENCE 分级（不确定的信息怎么标）
+# ═══════════════════════════════════════════════════════════════
+confidence:
+  levels:
+    - id: CONFIRMED
+      definition: "源码 / Schema / API / 数据库 / 正式文档直接确认；或已实测"
+      ai_may_use_as: "事实，可直接断言"
+    - id: INFERRED
+      definition: "通过代码逻辑推断，但未实测"
+      ai_may_use_as: "**只能作为设计输入，不得直接断言**。必须先实测确认，或改用 CONFIRMED 的等价断言"
+      examples:
+        - "「自己被禁用 + 关注自己」的组合结果（未实测）"
+        - "email 无点 TLD 是否被 @Email 接受（依赖 Hibernate Validator 实现）"
+    - id: UNKNOWN
+      definition: "无法确认"
+      ai_may_use_as: "**禁止当作事实**。要么标记 UNKNOWN 并登记，要么先取证"
+      current_unknowns_ref: issues.yaml → UNKNOWN 段
+  labeling_rule: >-
+    本知识库中每条事实在 YAML 里都有 confidence 字段（或在文件头声明整体置信度）。
+    生成用例时引用一条事实，必须确认它的 confidence 为 CONFIRMED；
+    引用 INFERRED/UNKNOWN 的必须降级为"先探针取证"的步骤，而不是断言。
+  evidence_requirement: >-
+    每条事实最好带 `source`（文件:行号）。
+    若源码改动导致 source 失效，validate.py 的抽查会报错 —— 这是**有意设计**的失效信号。
+
+# ═══════════════════════════════════════════════════════════════
+# 4. 不确定时的处理流程
+# ═══════════════════════════════════════════════════════════════
+when_uncertain:
+  desc: "**不要猜，也不要跳过 —— 走这个流程。**"
+  steps:
+    - step: 1
+      action: "先在本知识库里搜（很可能已经有答案）"
+    - step: 2
+      action: "再读源码（Controller → DTO → ServiceImpl → ErrorCode → schema.sql）"
+    - step: 3
+      action: "仍不确定 → 写一个**只读探针**实测"
+      precedent: ".workbuddy/tools/validation_order_probe.mjs 与 auth_layer_probe.mjs 就是这么做出来的"
+      note: "⚠️ 探测用 Node 的 fetch 单进程顺序执行，不要用 shell 里批量 curl（工具假象）"
+    - step: 4
+      action: "实测得到结论 → **先把它写进本知识库**（带 confidence: CONFIRMED 与 evidence），再生成用例"
+    - step: 5
+      action: "若确实无法确认 → 标 UNKNOWN 并登记进 issues.yaml，**不生成依赖它的用例**"
+
+# ═══════════════════════════════════════════════════════════════
+# 5. 生成前强制自检
+# ═══════════════════════════════════════════════════════════════
+pre_generation_checklist:
+  - "我引用的每个 API / 参数 / 错误码 / 字段 / 状态，都在 allowed_facts 指的文件里能查到吗？"
+  - "我有没有命中 forbidden_assumptions 的任意一条？（逐条扫，38 条）"
+  - "我引用的每个 rule_id 都真实存在吗？"
+  - "我的预期码与 rules/validation_order.yaml 的层序一致吗？"
+  - "我断言的分支在 rules/validation_order.yaml §4 里是可达的吗？"
+  - "涉及计数的用例有两条独立断言吗？（XC-005）"
+  - "有没有把 INFERRED / UNKNOWN 当成事实断言？"
+  - "HTTP 状态码断言有没有误用？"
+
+ai_checklist:
+  - "本文件是**硬约束**，不是建议 —— 命中 forbidden_assumptions 即判不通过"
+  - "不确定就取证（§4），取完证先登记再生成"
+  - "只引用 CONFIRMED 的事实做断言"

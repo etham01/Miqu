@@ -1,0 +1,730 @@
+# Miqu 测试数据生成规则
+#
+# 用途：AI 生成测试数据时的**取值字典**。回答"这个字段该填什么才算合法/非法/边界"。
+# 消费者：LLM（造数据）、Validator（校验边界值与常量一致）、执行器（生成 parametrize 参数）
+#
+# 真相来源：
+#   DTO Bean Validation 注解（约束与文案）
+#   BizConstants（数值边界）
+#   ServiceImpl（服务端额外校验）
+#   schema.sql（DDL 层约束）
+#
+# confidence: CONFIRMED（约束值均来自源码）
+#             标注 GENERATED 的示例值是按约束推导的**建议取值**，非源码枚举，
+#             使用前应确认其与约束一致（validate.py 会校验数值边界，不校验示例字面量）。
+#
+# ⚠️ 生成纪律：
+#   1. 只用本文件列出的字段名。**不得臆造字段**（如给 RegisterRequest 加 phone）。
+#   2. 边界值必须成对生成：min / min-1 / max / max+1。
+#   3. 一个用例只违反**一条**约束，否则 message 断言不可靠（见 error_codes.yaml）。
+
+meta:
+  boundary_strategy: ["min", "min_minus_one", "max", "max_plus_one"]
+  one_violation_per_case: true
+  reason: "GlobalExceptionHandler 用 findFirst() 取第一个字段错误，多违规时文案不稳定"
+
+# ═════════════════════════════════════════════
+# 一、通用取值生成规则（跨字段复用）
+# ═════════════════════════════════════════════
+generic_value_generators:
+  string_by_length:
+    desc: "按长度约束生成边界值"
+    template:
+      at_min: "'a' * min"
+      below_min: "'a' * (min - 1)   # min=1 时用空串"
+      at_max: "'a' * max"
+      above_max: "'a' * (max + 1)"
+    note: "用 ASCII 字母避免多字节干扰；测中文时注意 VARCHAR(n) 的 n 是**字符数**不是字节数（utf8mb4）"
+
+  chinese_length_note:
+    fact: "MySQL VARCHAR(1000) 在 utf8mb4 下是 **1000 个字符**，可存 1000 个汉字"
+    corroboration: "database/data.sql 的 post id=3 用 REPEAT(中文串,44)+中文尾串 恰好凑成 1000 字符"
+    test_implication: "测长度上限时**中文与英文的边界值相同**（都是 1000 字符），不要按字节算"
+
+  null_vs_empty_vs_blank:
+    desc: "三者在本项目中行为**不同**，必须区分"
+    behaviors:
+      - {input: "字段缺失（JSON 中不出现）", for_String: "值为 null", for_Integer: "值为 null",
+         not_blank_result: "400（@NotBlank 视 null 为违规）",
+         not_null_result: "400（@NotNull）",
+         size_only_result: "**通过**（@Size 对 null 不校验）"}
+      - {input: '""（空串）', not_blank_result: "400", not_null_result: "**通过**（非 null）",
+         size_only_result: "**通过**（长度 0 ≤ max）"}
+      - {input: '"   "（纯空白）', not_blank_result: "400（@NotBlank 会 trim 后判空）",
+         not_null_result: "**通过**", size_only_result: "**通过**"}
+    critical_case: >-
+      ⚠️ **PostCreateRequest.content 只有 @Size 没有 @NotBlank**。
+      所以 content=null 或 content="" 都**通过 DTO 校验**，
+      然后由 Service 的跨字段规则（content 与 images 均空）抛 EMPTY_POST(400)。
+      → 断言 code=400 + "动态内容与图片不能同时为空"，不是"动态内容不能超过 1000 个字符"。
+
+  unknown_fields:
+    fact: "Jackson 配置为忽略未知字段（SER-06）"
+    behavior: "请求体多传不存在的字段 → **静默忽略，返回 200**（不报 400）"
+    test_use: "批量赋值防护测试（SEC-003）：多传 role/status/username，断言**字段未被修改**"
+
+  number_type_mismatch:
+    fact: "整数字段传字符串（如 {\"gender\":\"abc\"}）→ HttpMessageNotReadableException"
+    expected: {code: 400, message: "请求体格式不正确"}
+
+  json_malformed:
+    input: "'{invalid json'"
+    expected: {code: 400, message: "请求体格式不正确"}
+
+  sql_injection_payloads:
+    desc: "本项目用 MyBatis-Plus 参数化查询 + SqlLikeUtils 转义，注入应**无效**"
+    payloads: ["' OR '1'='1", "'; DROP TABLE user; --", "1 UNION SELECT * FROM user", "%", "_", "\\%"]
+    expected_behavior: "作为**普通字符串**处理，不报 500，不泄露额外数据"
+    special_case_wildcard:
+      payload: "keyword='%' 或 '_'"
+      fact: "SqlLikeUtils.contains 会转义 % 和 _"
+      expected: "**不匹配全表**；只匹配字面含该字符的数据（通常为空）"
+      source: UserServiceImpl.java:182 + common/SqlLikeUtils.java
+      related_rule: SEC-006
+    path_param_note: >-
+      路径参数带 {id:[0-9]+} 正则约束的端点，注入串会导致**路径不匹配** → 404，
+      而非 400。见 error_codes.yaml 的 path_param_regex（该结论为 INFERRED，建议先实测）。
+
+  xss_payloads:
+    payloads: ['<script>alert(1)</script>', '"><img src=x onerror=alert(1)>']
+    expected_api_behavior: "后端**不做 HTML 转义**，原样存储与返回（JSON 响应中是安全的）"
+    expected_frontend: "前端渲染是否转义属**前端职责**，只能由浏览器回归验证"
+    confidence: INFERRED
+    note: "未在后端源码中找到显式的 HTML 清洗逻辑。若要断言前端已转义，需写浏览器用例实测。"
+
+  unicode_edge_cases:
+    payloads:
+      - {name: emoji, value: "😀🎉", note: "utf8mb4 支持 4 字节字符，应正常存取"}
+      - {name: 零宽字符, value: "a​b", note: "含 U+200B，长度计算可能与直觉不同"}
+      - {name: 组合字符, value: "é", note: "NFC/NFD 差异会影响长度与唯一性判定"}
+      - {name: 换行, value: "line1\nline2", note: "VARCHAR 可存换行"}
+    confidence: INFERRED
+    note: "这些是**建议探测项**，源码未显式处理，实际行为需实测确认后再固化为断言。"
+
+# ═════════════════════════════════════════════
+# 二、逐字段取值字典
+# ═════════════════════════════════════════════
+fields:
+  # ---------- 注册 ----------
+  - field: RegisterRequest.username
+    api: POST_AUTH_REGISTER
+    type: String
+    required: true
+    constraints:
+      - {annotation: "@NotBlank", message: "用户名不能为空"}
+      - {annotation: "@Size(min=4,max=20)", message: "用户名长度必须在 4~20 个字符之间"}
+      - {annotation: "@Pattern(^[A-Za-z][A-Za-z0-9_]*$)", message: "用户名必须以字母开头，且只能含字母、数字和下划线"}
+    db_column: "user.username VARCHAR(32) UNIQUE"
+    valid_examples:
+      - {value: "abcd", boundary: min(4), confidence: GENERATED}
+      - {value: "abcdefghijklmnopqrst", boundary: "max(20)", confidence: GENERATED}
+      - {value: "Alice_2026", note: "字母开头 + 数字下划线混合", confidence: GENERATED}
+      - {value: "a123", note: "最短合法：字母开头", confidence: GENERATED}
+    invalid_examples:
+      - {value: "abc", reason: "长度 3 < min 4", expect_message: "用户名长度必须在 4~20 个字符之间", confidence: GENERATED}
+      - {value: "abcdefghijklmnopqrstu", reason: "长度 21 > max 20", expect_message: "用户名长度必须在 4~20 个字符之间", confidence: GENERATED}
+      - {value: "", reason: 空串, expect_message: "用户名不能为空", confidence: GENERATED}
+      - {value: "   ", reason: 纯空白, expect_message: "用户名不能为空", confidence: GENERATED}
+      - {value: "1alice", reason: "数字开头，违反 @Pattern", expect_message: "用户名必须以字母开头，且只能含字母、数字和下划线", confidence: GENERATED}
+      - {value: "_alice", reason: "下划线开头，违反 @Pattern", expect_message: "用户名必须以字母开头，且只能含字母、数字和下划线", confidence: GENERATED}
+      - {value: "ali-ce", reason: "含连字符", expect_message: "用户名必须以字母开头，且只能含字母、数字和下划线", confidence: GENERATED}
+      - {value: "ali ce", reason: "含空格", expect_message: "用户名必须以字母开头，且只能含字母、数字和下划线", confidence: GENERATED}
+      - {value: "张三", reason: "含中文", expect_message: "用户名必须以字母开头，且只能含字母、数字和下划线", confidence: GENERATED}
+      - {value: "alice@example.com", reason: "含 @ 和 .", expect_message: "用户名必须以字母开头，且只能含字母、数字和下划线", confidence: GENERATED}
+    uniqueness_cases:
+      - {scenario: 用户名已存在, setup: "先注册同名用户，或用种子 test001",
+       expect: {code: 409, message: "用户名已被占用", error_code: USERNAME_EXISTS}}
+    pattern_note: >-
+      ⚠️ 正则允许**纯字母**（如 "abcd"），因为 [A-Za-z0-9_]* 的 * 可为零次。
+      也允许大写字母，但**未说明是否大小写不敏感去重**。
+      confidence: UNKNOWN —— 见 issues.yaml U-01（"Alice" 与 "alice" 是否算重复未确认，
+      取决于 MySQL 排序规则 utf8mb4_0900_ai_ci，其中 ai = accent insensitive、
+      ci = case insensitive，**推断为大小写不敏感**，但未见测试验证）。
+
+  - field: RegisterRequest.password
+    api: POST_AUTH_REGISTER
+    type: String
+    required: true
+    constraints:
+      - {annotation: "@NotBlank", message: "密码不能为空"}
+      - {annotation: "@Size(min=6,max=20)", message: "密码长度必须在 6~20 个字符之间"}
+    storage: "BCrypt 哈希，**响应中不返回**"
+    valid_examples:
+      - {value: "123456", boundary: "min(6)", note: "项目所有种子账号与 fresh_user 的默认密码", confidence: CONFIRMED}
+      - {value: "12345678901234567890", boundary: "max(20)", confidence: GENERATED}
+    invalid_examples:
+      - {value: "12345", reason: "长度 5 < 6", expect_message: "密码长度必须在 6~20 个字符之间", confidence: GENERATED}
+      - {value: "123456789012345678901", reason: "长度 21 > 20", expect_message: "密码长度必须在 6~20 个字符之间", confidence: GENERATED}
+      - {value: "", reason: 空串, expect_message: "密码不能为空", confidence: GENERATED}
+    complexity_note: >-
+      ⚠️ **只校验长度，不校验复杂度**。无大写/数字/特殊字符要求。
+      → 不要生成"密码必须含数字"之类的用例，项目没这条规则。
+
+  - field: RegisterRequest.nickname
+    api: POST_AUTH_REGISTER
+    type: String
+    required: true
+    constraints:
+      - {annotation: "@NotBlank", message: "昵称不能为空"}
+      - {annotation: "@Size(max=32)", message: "昵称长度不能超过 32 个字符"}
+    valid_examples:
+      - {value: "张三", note: "中文昵称合法（无 @Pattern）", confidence: CONFIRMED, corroborated_by: "data.sql 种子昵称均为中文"}
+      - {value: "😀 emoji 昵称", note: "emoji 合法（utf8mb4）", confidence: INFERRED}
+      - {value: "a*32", boundary: "max(32)", confidence: GENERATED}
+    invalid_examples:
+      - {value: "a*33", reason: "超 32 字符", expect_message: "昵称长度不能超过 32 个字符", confidence: GENERATED}
+      - {value: "", reason: 空串, expect_message: "昵称不能为空", confidence: GENERATED}
+    uniqueness_note: "**昵称不唯一**（只有 idx_nickname 普通索引，无 UNIQUE）→ 可重复"
+
+  - field: RegisterRequest.email
+    api: POST_AUTH_REGISTER
+    type: String
+    required: true
+    constraints:
+      - {annotation: "@NotBlank", message: "邮箱不能为空"}
+      - {annotation: "@Size(max=64)", message: "邮箱长度不能超过 64 个字符"}
+      - {annotation: "@Email", message: "邮箱格式不正确"}
+    db_column: "user.email VARCHAR(64) UNIQUE"
+    valid_examples:
+      - {value: "qa{suffix}@miqu.test", note: "**fresh_user 夹具的默认 email 模式**", confidence: CONFIRMED,
+         source: tests/conftest.py}
+      - {value: "user.name+tag@sub.example.com", confidence: GENERATED}
+    invalid_examples:
+      - {value: "not-an-email", reason: 无 @, expect_message: "邮箱格式不正确", confidence: GENERATED}
+      - {value: "user@", reason: 无域名, expect_message: "邮箱格式不正确", confidence: GENERATED}
+      - {value: "@example.com", reason: 无本地部分, expect_message: "邮箱格式不正确", confidence: GENERATED}
+      - {value: "user@com", reason: "TLD 无点", expect_message: "邮箱格式不正确", confidence: INFERRED,
+         note: "取决于 Spring @Email 的实现（Hibernate Validator 默认允许无点 TLD），**建议实测确认**"}
+      - {value: "a*65@example.com", reason: "超 64 字符", expect_message: "邮箱长度不能超过 64 个字符", confidence: GENERATED,
+         caveat: "⚠️ 同时违反 @Size 与可能触发 @Email，多违规 → 只断言 code=400"}
+    uniqueness_cases:
+      - {scenario: 邮箱已注册, expect: {code: 409, message: "邮箱已被注册", error_code: EMAIL_EXISTS}}
+    two_validators_note: >-
+      ⚠️ BizConstants.EMAIL_PATTERN 定义了正则，但 RegisterRequest 实际用的是 **@Email 注解**
+      （Hibernate Validator 的规则），两者**不完全等价**。以 @Email 的实际行为为准。
+      见 issues.yaml I-02。
+
+  - field: RegisterRequest.gender
+    api: POST_AUTH_REGISTER
+    type: Integer
+    required: false
+    constraints:
+      - {annotation: "@Min(0)@Max(2)", message: "性别取值只能是 0、1 或 2"}
+    default_when_absent: 0
+    valid_examples: [{value: 0}, {value: 1}, {value: 2}]
+    invalid_examples:
+      - {value: -1, expect_message: "性别取值只能是 0、1 或 2", confidence: GENERATED}
+      - {value: 3, expect_message: "性别取值只能是 0、1 或 2", confidence: GENERATED}
+      - {value: '"male"', reason: 类型不匹配, expect_message: "请求体格式不正确", confidence: GENERATED}
+    enum_ref: "data/data_model.yaml → GenderEnum"
+
+  - field: RegisterRequest.bio
+    api: POST_AUTH_REGISTER
+    type: String
+    required: false
+    constraints: [{annotation: "@Size(max=255)", message: "个人简介长度不能超过 255 个字符"}]
+    boundary_examples:
+      - {value: "a*255", boundary: max, expect: 200, confidence: GENERATED}
+      - {value: "a*256", boundary: max+1, expect: "400 个人简介长度不能超过 255 个字符", confidence: GENERATED}
+    null_behavior: "不传 → 数据库 DEFAULT ''（空串），响应中 bio 为 ''"
+
+  - field: RegisterRequest.avatar
+    api: POST_AUTH_REGISTER
+    type: String
+    required: false
+    constraints: [{annotation: "@Size(max=255)", message: "头像地址长度不能超过 255 个字符"}]
+    ⚠️_prefix_check_discrepancy:
+      fact: >-
+        注册接口的 avatar **只校验长度，不校验 /uploads/ 前缀**（DTO 只有 @Size）。
+        而 PUT /api/users/me/avatar **会校验前缀**（Service 层）。
+        两者行为**不一致**。
+      confidence: INFERRED
+      inference_basis: >-
+        从 RegisterRequest DTO 只有 @Size 注解、且 AuthServiceImpl 注册流程中
+        未见前缀校验逻辑推断。**未找到明确的注册后 avatar 前缀校验代码**。
+      test_implication: >-
+        → 不要断言"注册时传外链 avatar 返回 400"。若要用此结论，**先写探测用例实测**。
+        见 issues.yaml U-02。
+
+  - field: RegisterRequest.birthday
+    api: POST_AUTH_REGISTER
+    type: "LocalDate"
+    required: false
+    format: yyyy-MM-dd
+    valid_examples: [{value: "1998-03-15", confidence: CONFIRMED, corroborated_by: "API_CONVENTIONS.md 序列化示例"}]
+    invalid_examples:
+      - {value: "1998/03/15", reason: 格式错误, expect: "400 请求体格式不正确", confidence: GENERATED}
+      - {value: "2030-13-45", reason: 月份/日期越界, expect: "400 请求体格式不正确", confidence: GENERATED}
+    no_range_validation: >-
+      ⚠️ **无 @Past / @Future 校验**，未来日期与超早日期都会被接受。
+      → 不要生成"生日不能是未来"的用例，项目没这条规则。
+
+  # ---------- 登录 ----------
+  - field: LoginRequest.username
+    api: POST_AUTH_LOGIN
+    type: String
+    required: true
+    constraints: [{annotation: "@NotBlank", message: "用户名不能为空"}]
+    no_format_check: "**不校验长度与格式**，任意非空字符串都会走到查库"
+    valid_examples: [{value: test001, confidence: CONFIRMED}, {value: admin, confidence: CONFIRMED}]
+    invalid_examples:
+      - {value: "", expect: "400 用户名不能为空", confidence: GENERATED}
+      - {value: "nonexistent_user_xyz", expect: "401 用户名或密码错误",
+         note: "**不是 404**，防账号枚举", confidence: CONFIRMED}
+
+  - field: LoginRequest.password
+    api: POST_AUTH_LOGIN
+    type: String
+    required: true
+    constraints: [{annotation: "@NotBlank", message: "密码不能为空"}]
+    no_length_check: >-
+      ⚠️ 登录**不校验密码长度**（与注册不同）。
+      传 1 位密码不会报 400，会走到查库返回 401。
+    invalid_examples:
+      - {value: "", expect: "400 密码不能为空", confidence: GENERATED}
+      - {value: "wrongpass", expect: "401 用户名或密码错误", confidence: CONFIRMED}
+
+  # ---------- 改资料 ----------
+  - field: UpdateProfileRequest.nickname
+    api: PUT_USERS_ME
+    type: String
+    required: true
+    constraints:
+      - {annotation: "@NotBlank", message: "昵称不能为空"}
+      - {annotation: "@Size(max=32)", message: "昵称长度不能超过 32 个字符"}
+    doc_conflict: "Swagger 称'null 表示不修改'，但 @NotBlank 使其**必填** → 见 issues.yaml C-06"
+
+  - field: UpdateProfileRequest.gender
+    api: PUT_USERS_ME
+    required: false
+    constraints: [{annotation: "@Min(0)@Max(2)", message: "性别取值只能是 0、1 或 2"}]
+    null_meaning: 不修改
+
+  - field: UpdateProfileRequest.bio
+    api: PUT_USERS_ME
+    required: false
+    constraints: [{annotation: "@Size(max=255)", message: "个人简介长度不能超过 255 个字符"}]
+    null_meaning: 不修改
+    empty_string_meaning: "**清空为 ''**（与 null 不同）"
+
+  - field: UpdateProfileRequest.birthday
+    api: PUT_USERS_ME
+    required: false
+    null_meaning: 不修改
+
+  # ---------- 改密码 ----------
+  - field: ChangePasswordRequest.oldPassword
+    api: PUT_USERS_ME_PASSWORD
+    required: true
+    constraints: [{annotation: "@NotBlank", message: "原密码不能为空"}]
+    no_length_check: "不校验长度"
+    invalid_examples:
+      - {value: "wrongold", expect: {code: 400, message: "原密码不正确", error_code: OLD_PASSWORD_MISMATCH}, confidence: CONFIRMED}
+
+  - field: ChangePasswordRequest.newPassword
+    api: PUT_USERS_ME_PASSWORD
+    required: true
+    constraints:
+      - {annotation: "@NotBlank", message: "新密码不能为空"}
+      - {annotation: "@Size(min=6,max=20)", message: "新密码长度必须在 6~20 个字符之间"}
+    invalid_examples:
+      - {value: "12345", expect: "400 新密码长度必须在 6~20 个字符之间", confidence: GENERATED}
+      - {value: "123456（与旧密码相同）", expect: {code: 400, message: "新密码不能与原密码相同",
+         error_code: PASSWORD_SAME_AS_OLD}, confidence: CONFIRMED}
+    test_warning: "**只用 fresh_user 测改密码**，种子账号改了无法恢复"
+
+  # ---------- 头像 ----------
+  - field: UpdateAvatarRequest.avatar
+    api: PUT_USERS_ME_AVATAR
+    required: true
+    constraints:
+      - {annotation: "@NotBlank", message: "头像地址不能为空"}
+      - {annotation: "@Size(max=255)", message: "头像地址长度不能超过 255 个字符"}
+      - {annotation: "Service 层前缀校验", rule: "trim() 后必须 startsWith('/uploads/')",
+         error_code: INVALID_IMAGE_URL, message: "图片地址不合法，请先通过上传接口获取",
+         source: UserServiceImpl.java:101-104}
+    valid_examples:
+      - {value: "/uploads/image/2026/09/abc123.jpg", confidence: GENERATED,
+         note: "正确做法是**先调 POST /api/files/image 拿真实 url**，再传给本接口"}
+    invalid_examples:
+      - {value: "https://evil.com/x.png", reason: 外链, expect_code: 400, confidence: CONFIRMED}
+      - {value: "/uploads-evil/x.png", reason: "近似前缀（前缀带尾部 / 故被拒）", expect_code: 400, confidence: CONFIRMED}
+      - {value: "/uploadsx/y.png", reason: 近似前缀, expect_code: 400, confidence: CONFIRMED}
+      - {value: "uploads/z.png", reason: "缺前导斜杠", expect_code: 400, confidence: GENERATED}
+      - {value: "//uploads/x.png", reason: "双斜杠开头", expect_code: 400, confidence: GENERATED}
+      - {value: "  /uploads/x.png  ", reason: "**两端空白会被 trim**，故应通过", expect_code: 200, confidence: CONFIRMED,
+         source: "UserServiceImpl.java:95 request.avatar().trim()"}
+      - {value: "", reason: 空串, expect: "400 头像地址不能为空", confidence: GENERATED}
+    related_rules: [USER-004, USER-005, SEC-011]
+
+  # ---------- 动态 ----------
+  - field: PostCreateRequest.content
+    api: POST_POSTS
+    type: String
+    required: false
+    constraints: [{annotation: "@Size(max=1000)", message: "动态内容不能超过 1000 个字符"}]
+    no_not_blank: "**无 @NotBlank** → null/空串通过 DTO，由 Service 跨字段规则处理"
+    boundary_examples:
+      - {value: "a*1000", boundary: max, expect: 200, confidence: GENERATED,
+         corroborated_by: "种子 post id=3 内容恰好 1000 字符"}
+      - {value: "a*1001", boundary: max+1, expect: "400 动态内容不能超过 1000 个字符", confidence: GENERATED}
+      - {value: "", boundary: "空 + 无图片", expect: {code: 400, message: "动态内容与图片不能同时为空",
+         error_code: EMPTY_POST}, confidence: CONFIRMED}
+      - {value: null, boundary: "null + 无图片", expect: "400 EMPTY_POST", confidence: CONFIRMED,
+         note: "Service 把 null 视为空串"}
+      - {value: '"   "（纯空白）+ 无图片', expect: "400 EMPTY_POST", confidence: INFERRED,
+         note: "Service 会 trim 后判空；未逐字确认 trim 时机，建议实测"}
+      - {value: '"   "（纯空白）+ 有图片', expect: 200, confidence: INFERRED}
+
+  - field: PostCreateRequest.images
+    api: POST_POSTS
+    type: "List<String>"
+    required: false
+    constraints:
+      - {annotation: "@Size(max=9)", message: "最多只能上传 9 张图片"}
+      - {rule: "每个元素 trim 后过滤空串", source: PostServiceImpl}
+      - {rule: "过滤后每个 URL 必须 startsWith('/uploads/')", error_code: INVALID_IMAGE_URL,
+         source: PostServiceImpl.java:318-325}
+    boundary_examples:
+      - {value: "9 个合法 /uploads/ URL", boundary: max, expect: 200, confidence: GENERATED,
+         corroborated_by: "种子 post id=1 有 9 张图"}
+      - {value: "10 个 URL", boundary: max+1, expect: "400 最多只能上传 9 张图片", confidence: CONFIRMED,
+         note: "由 DTO @Size 先拦为 PARAM_INVALID，但文案与 TOO_MANY_IMAGES **字面相同**"}
+      - {value: "[]（空数组）+ content 为空", expect: "400 EMPTY_POST", confidence: CONFIRMED}
+      - {value: '["https://evil.com/a.jpg"]', expect: {code: 400, error_code: INVALID_IMAGE_URL}, confidence: CONFIRMED}
+      - {value: '["/uploads/a.jpg", ""]', note: "空串元素被过滤 → 实际 1 张图", expect: 200, confidence: CONFIRMED}
+      - {value: '["  /uploads/a.jpg  "]', note: "元素会 trim", expect: 200, confidence: CONFIRMED}
+      - {value: '["/uploads/a.jpg"] * 9（含重复）', note: "**无去重校验**，同一 URL 可重复 9 次",
+         expect: 200, confidence: INFERRED,
+         inference_basis: "未找到去重逻辑；post_image 唯一键是 (post_id, sort_order) 而非 (post_id, url)"}
+    order_preservation: "images 数组顺序 → post_image.sort_order = 0..n-1，响应 PostVO.images **保持原顺序**"
+    related_rules: [POST-002, POST-003, SEC-007]
+
+  # ---------- 评论 ----------
+  - field: CommentCreateRequest.content
+    api: POST_POSTS_ID_COMMENTS
+    required: true
+    constraints:
+      - {annotation: "@NotBlank", message: "评论内容不能为空"}
+      - {annotation: "@Size(max=500)", message: "评论内容不能超过 500 个字符"}
+    boundary_examples:
+      - {value: "a*500", boundary: max, expect: 200, confidence: GENERATED}
+      - {value: "a*501", boundary: max+1, expect: "400 评论内容不能超过 500 个字符", confidence: GENERATED}
+      - {value: "", expect: "400 评论内容不能为空", confidence: CONFIRMED,
+         attribution: "**归因于 PARAM_INVALID（DTO @NotBlank），不是 EMPTY_COMMENT（死枚举）**"}
+      - {value: "   ", expect: "400 评论内容不能为空", confidence: CONFIRMED}
+
+  # ---------- 私信 ----------
+  - field: MessageSendRequest.receiverId
+    api: POST_MESSAGES
+    type: Long
+    required: true
+    constraints: [{annotation: "@NotNull", message: "接收者不能为空"}]
+    invalid_examples:
+      - {value: null, expect: "400 接收者不能为空", confidence: CONFIRMED}
+      - {value: "自己的 id", expect: {code: 400, message: "不能给自己发送私信",
+         error_code: CANNOT_MESSAGE_SELF}, confidence: CONFIRMED}
+      - {value: 999999999, reason: 不存在, expect: {code: 404, message: "用户不存在"}, confidence: CONFIRMED}
+      - {value: 12, reason: "banned001（禁用）", expect: {code: 423, message: "账号已被禁用，请联系管理员"}, confidence: CONFIRMED}
+      - {value: 13, reason: "deleted001（已注销）", expect: {code: 404, message: "用户不存在"}, confidence: CONFIRMED}
+
+  - field: MessageSendRequest.content
+    api: POST_MESSAGES
+    required: true
+    constraints:
+      - {annotation: "@NotBlank", message: "消息内容不能为空"}
+      - {annotation: "@Size(max=1000)", message: "消息内容不能超过 1000 个字符"}
+    boundary_examples:
+      - {value: "a*1000", expect: 200, confidence: GENERATED}
+      - {value: "a*1001", expect: "400 消息内容不能超过 1000 个字符", confidence: CONFIRMED, related_rule: MSG-014}
+      - {value: "", expect: "400 消息内容不能为空", confidence: CONFIRMED, related_rule: MSG-011}
+    preview_truncation:
+      fact: "conversation.last_message_preview 截断至 **100 字符**（MESSAGE_PREVIEW_LENGTH）"
+      test_use: "发 1000 字消息 → 会话列表的 lastMessagePreview 只有 100 字"
+      boundary_examples:
+        - {value: "a*100", expect: "preview 长度 100", confidence: GENERATED}
+        - {value: "a*101", expect: "preview 长度 100（被截断）", confidence: GENERATED}
+        - {value: "a*1000", expect: "preview 长度 100，但 message.content 长度 1000", confidence: GENERATED}
+
+  - field: CreateConversationRequest.targetUserId
+    api: POST_CONVERSATIONS
+    type: Long
+    required: true
+    constraints: [{annotation: "@NotNull", message: "对方用户不能为空"}]
+    invalid_examples:
+      - {value: null, expect: "400 对方用户不能为空", confidence: CONFIRMED}
+      - {value: "自己", expect: {code: 400, message: "不能给自己发送私信"}, confidence: CONFIRMED,
+         note: "打开会话与发消息**共用** CANNOT_MESSAGE_SELF"}
+      - {value: "非互关用户", expect: {code: 403, message: "需要互相关注后才能私聊"}, confidence: CONFIRMED}
+
+  # ---------- 分页 ----------
+  - field: PageQuery.page
+    api: "所有 offset 分页端点"
+    type: Integer
+    default: 1
+    constraints: [{annotation: "@Min(1)", message: "页码必须大于 0"}]
+    boundary_examples:
+      - {value: 1, expect: 200, confidence: GENERATED}
+      - {value: 0, expect: "400 页码必须大于 0", confidence: GENERATED}
+      - {value: -1, expect: "400 页码必须大于 0", confidence: GENERATED}
+      - {value: 99999, reason: "超出总页数", expect: "200 + list=[] + total 不变", confidence: INFERRED,
+         note: "**无上限校验**，超范围页返回空列表而非报错"}
+
+  - field: PageQuery.size
+    api: "所有 offset 分页端点"
+    type: Integer
+    default: 10
+    constraints:
+      - {annotation: "@Min(1)", message: "每页条数必须大于 0"}
+      - {annotation: "@Max(50)", message: "每页条数不能超过 50"}
+    boundary_examples:
+      - {value: 1, boundary: min, expect: 200, confidence: GENERATED}
+      - {value: 0, boundary: min-1, expect: "400 每页条数必须大于 0", confidence: GENERATED}
+      - {value: 50, boundary: max, expect: 200, confidence: GENERATED}
+      - {value: 51, boundary: max+1, expect: "400 每页条数不能超过 50", confidence: GENERATED}
+      - {value: -1, expect: "400 每页条数必须大于 0", confidence: GENERATED}
+
+  - field: MessageQuery.beforeId
+    api: GET_CONVERSATIONS_ID_MESSAGES
+    type: Long
+    required: false
+    constraints: [{annotation: "@Min(1)", message: "beforeId 必须大于 0"}]
+    boundary_examples:
+      - {value: "不传", expect: "返回最新 size 条", confidence: CONFIRMED}
+      - {value: 0, expect: "400 beforeId 必须大于 0", confidence: GENERATED}
+      - {value: "上一页最早一条的 id", expect: "返回该条之前的 size 条", confidence: CONFIRMED}
+      - {value: 999999999, expect: "200 + 返回全部（无更早消息则空）", confidence: INFERRED}
+
+  - field: MessageQuery.size
+    api: GET_CONVERSATIONS_ID_MESSAGES
+    type: Integer
+    default: 20
+    constraints:
+      - {annotation: "@Min(1)", message: "每页条数必须大于 0"}
+      - {annotation: "@Max(50)", message: "每页条数不能超过 50"}
+    default_differs_from_page_query: "**默认 20，不是 10**（PageQuery 默认 10）"
+
+  # ---------- 搜索 ----------
+  - field: UserSearchQuery.keyword
+    api: GET_USERS_SEARCH
+    required: true
+    constraints:
+      - {annotation: "@NotBlank", message: "搜索关键词不能为空"}
+      - {annotation: "@Size(max=32)", message: "搜索关键词不能超过 32 个字符"}
+    service_layer_extra:
+      - {rule: "Service 再校验一次空值", error_message: "搜索关键词不能为空",
+         source: UserServiceImpl.java:176-178, note: "通常 DTO 已拦，此分支不可达"}
+    valid_examples:
+      - {value: test001, note: "按 username 匹配", confidence: CONFIRMED}
+      - {value: 张三, note: "按 nickname 匹配", confidence: CONFIRMED}
+      - {value: "a*32", boundary: max, confidence: GENERATED}
+    invalid_examples:
+      - {value: "", expect: "400 搜索关键词不能为空", confidence: CONFIRMED}
+      - {value: "   ", expect: "400 搜索关键词不能为空", confidence: CONFIRMED}
+      - {value: "a*33", expect: "400 搜索关键词不能超过 32 个字符", confidence: GENERATED}
+    special_values:
+      - {value: "%", expect: "**不匹配全表**（LIKE 通配符被转义）", confidence: CONFIRMED, related_rule: SEC-006}
+      - {value: "_", expect: "不作为单字符通配符", confidence: CONFIRMED, related_rule: SEC-006}
+      - {value: "不存在的关键词xyz", expect: "200 + list=[] + total=0", confidence: GENERATED}
+    matches_on: ["username", "nickname"]
+    does_not_match: ["email", "bio"]
+    includes_disabled_users: true
+    excludes_deleted_users: true
+
+  # ---------- 通知筛选 ----------
+  - field: NotificationQuery.type
+    api: GET_NOTIFICATIONS
+    type: Integer
+    required: false
+    constraints: [{annotation: "@Min(1)@Max(3)", message: "通知类型只能是 1、2 或 3"}]
+    valid_examples: [{value: 1, desc: 关注}, {value: 2, desc: 点赞}, {value: 3, desc: 评论}]
+    invalid_examples:
+      - {value: 0, expect: "400 通知类型只能是 1、2 或 3", confidence: GENERATED}
+      - {value: 4, expect: "400 通知类型只能是 1、2 或 3", confidence: GENERATED,
+         note: "type=4(MESSAGE) 是 @Deprecated 保留值，一期不用"}
+    absent_behavior: "不传 → 返回全部类型"
+
+  - field: NotificationQuery.isRead
+    api: GET_NOTIFICATIONS
+    type: Integer
+    required: false
+    constraints: [{annotation: "@Min(0)@Max(1)", message: "已读状态只能是 0 或 1"}]
+    valid_examples: [{value: 0, desc: 未读}, {value: 1, desc: 已读}]
+    invalid_examples: [{value: 2, expect: "400 已读状态只能是 0 或 1", confidence: GENERATED}]
+
+  # ---------- 举报 ----------
+  - field: CreateReportRequest.targetType
+    api: POST_REPORTS
+    type: Integer
+    required: true
+    constraints: [{annotation: "@NotNull@Min(1)@Max(3)", message: "举报目标类型只能是 1、2 或 3"}]
+    valid_examples: [{value: 1, desc: 用户}, {value: 2, desc: 动态}, {value: 3, desc: 评论}]
+    invalid_examples:
+      - {value: null, expect: "400 举报目标类型不能为空", confidence: CONFIRMED}
+      - {value: 0, expect: "400 举报目标类型只能是 1、2 或 3", confidence: GENERATED}
+      - {value: 4, expect: "400 举报目标类型只能是 1、2 或 3", confidence: CONFIRMED,
+         note: "⚠️ **不是** INVALID_TARGET_TYPE（DTO 先拦，Service 分支不可达）见 issues.yaml C-03"}
+
+  - field: CreateReportRequest.reasonType
+    api: POST_REPORTS
+    required: true
+    constraints: [{annotation: "@NotNull@Min(1)@Max(5)", message: "举报原因取值不合法"}]
+    valid_examples: [{value: 1}, {value: 2}, {value: 3}, {value: 4}, {value: 5}]
+    invalid_examples:
+      - {value: 0, expect: "400 举报原因取值不合法", confidence: GENERATED}
+      - {value: 6, expect: "400 举报原因取值不合法", confidence: GENERATED}
+
+  - field: CreateReportRequest.reasonDetail
+    api: POST_REPORTS
+    required: false
+    constraints: [{annotation: "@Size(max=255)", message: "补充说明不能超过 255 个字符"}]
+    boundary_examples:
+      - {value: "a*255", expect: 200, confidence: GENERATED}
+      - {value: "a*256", expect: "400 补充说明不能超过 255 个字符", confidence: GENERATED}
+
+  - field: CreateReportRequest.targetId
+    api: POST_REPORTS
+    type: Long
+    required: true
+    constraints: [{annotation: "@NotNull", message: "举报目标不能为空"}]
+    invalid_examples:
+      - {value: null, expect: "400 举报目标不能为空", confidence: CONFIRMED}
+      - {value: "不存在的 id", expect: "404（按 targetType 分别为 用户不存在/动态不存在或已被删除/评论不存在或已被删除）", confidence: CONFIRMED}
+      - {value: "自己的资源 id", expect: {code: 400, message: "不能举报自己"}, confidence: CONFIRMED}
+
+  # ---------- 管理端 ----------
+  - field: UpdateUserStatusRequest.status
+    api: PUT_ADMIN_USERS_ID_STATUS
+    type: Integer
+    required: true
+    constraints: [{annotation: "@NotNull@Min(0)@Max(1)", message: "状态只能是 0（禁用）或 1（正常）"}]
+    valid_examples: [{value: 0, desc: 禁用}, {value: 1, desc: 正常}]
+    invalid_examples:
+      - {value: null, expect: "400 状态不能为空", confidence: CONFIRMED}
+      - {value: 2, expect: "400 状态只能是 0（禁用）或 1（正常）", confidence: GENERATED}
+      - {value: -1, expect: "400 状态只能是 0（禁用）或 1（正常）", confidence: GENERATED}
+
+  - field: HandleReportRequest.status
+    api: PUT_ADMIN_REPORTS_ID_HANDLE
+    required: true
+    constraints: [{annotation: "@NotNull@Min(1)@Max(2)", message: "处理结论只能是 1（已处理）或 2（已驳回）"}]
+    valid_examples: [{value: 1, desc: 已处理}, {value: 2, desc: 已驳回}]
+    invalid_examples:
+      - {value: 0, expect: "400 处理结论只能是 1（已处理）或 2（已驳回）", confidence: GENERATED,
+         note: "0=PENDING 不能作为处理结论（不能把举报改回待处理）"}
+      - {value: 3, expect: "400 处理结论只能是 1（已处理）或 2（已驳回）", confidence: GENERATED}
+
+  - field: HandleReportRequest.action
+    api: PUT_ADMIN_REPORTS_ID_HANDLE
+    type: String
+    required: false
+    default: NONE
+    enum_values: [NONE, DELETE_POST, DELETE_COMMENT, DISABLE_USER]
+    case_insensitive: true
+    valid_examples:
+      - {value: NONE, confidence: CONFIRMED}
+      - {value: DELETE_POST, requires_target_type: 2, confidence: CONFIRMED}
+      - {value: DELETE_COMMENT, requires_target_type: 3, confidence: CONFIRMED}
+      - {value: DISABLE_USER, requires_target_type: 1, confidence: CONFIRMED}
+      - {value: delete_post, note: "**小写也接受**（大小写不敏感）", confidence: CONFIRMED}
+    invalid_examples:
+      - {value: "BAN_USER", reason: 不存在的动作, expect: {code: 400, message: "不支持的处置动作"}, confidence: CONFIRMED}
+      - {value: "DELETE_POST 但 targetType=3", expect: {code: 400, message: "处置动作与举报目标类型不匹配"}, confidence: CONFIRMED}
+      - {value: "DELETE_POST 且 status=2(驳回)", expect: {code: 400, message: "驳回举报时不能同时执行处置动作"}, confidence: CONFIRMED}
+    forbidden_values_note: >-
+      ⚠️ **不要臆造** action 值（如 BAN_IP / DELETE_USER / RESTORE_POST）。
+      只有上述 4 个合法。
+
+  - field: HandleReportRequest.handleRemark
+    api: PUT_ADMIN_REPORTS_ID_HANDLE
+    required: false
+    constraints: [{annotation: "@Size(max=255)", message: "处理备注不能超过 255 个字符"}]
+    note: "硬编码 255，未用 BizConstants.REPORT_DETAIL_MAX（值相同）"
+
+  - field: AdminUserQuery.keyword / status
+    api: GET_ADMIN_USERS
+    constraints:
+      - {field: keyword, annotation: "@Size(max=32)", message: "搜索关键词不能超过 32 个字符"}
+      - {field: status, annotation: "@Min(0)@Max(1)", message: "状态只能是 0 或 1"}
+
+  - field: AdminReportQuery.status
+    api: GET_ADMIN_REPORTS
+    constraints: [{annotation: "@Min(0)@Max(2)", message: "处理状态只能是 0、1 或 2"}]
+    note: "**允许 0**（筛选待处理），与 HandleReportRequest.status 的 @Min(1) 不同"
+
+  # ---------- 文件上传 ----------
+  - field: "POST_FILES_IMAGE 的 file 字段"
+    api: POST_FILES_IMAGE
+    type: MultipartFile
+    form_field_name: file
+    content_type: multipart/form-data
+    valid_examples:
+      - {desc: "真实 JPEG 字节（FFD8FF 开头）", expect: 200, confidence: CONFIRMED}
+      - {desc: "真实 PNG 字节（89504E47 开头）", expect: 200, confidence: CONFIRMED}
+      - {desc: "真实 GIF 字节（GIF87a/GIF89a 开头）", expect: 200, confidence: CONFIRMED}
+      - {desc: "真实 WebP 字节（RIFF....WEBP）", expect: 200, confidence: CONFIRMED}
+    invalid_examples:
+      - {desc: "空文件（0 字节）", expect: {code: 400, message: "上传文件不能为空"}, confidence: CONFIRMED}
+      - {desc: "< 12 字节的文件", expect: {code: 400, message: "仅支持 jpg / png / gif / webp 格式的图片"},
+         confidence: CONFIRMED, source: "LocalFileStorageService.java:92-94"}
+      - {desc: "文本文件改名 .jpg", expect: "400 仅支持 jpg / png / gif / webp 格式的图片",
+         confidence: CONFIRMED, note: "**魔数校验**，扩展名无效"}
+      - {desc: "PE 可执行文件（MZ 开头）改名 .png", expect: "400 同上", confidence: CONFIRMED}
+      - {desc: "> 5MB 的合法图片", expect: "400 图片大小不能超过 5MB", confidence: CONFIRMED,
+         caveat: "若超过 Spring 的 max-file-size(5MB) 可能先抛 MaxUploadSizeExceededException，需实测确认实际码"}
+      - {desc: "请求体不是 multipart", expect: {code: 400, error_code: PARAM_INVALID}, confidence: CONFIRMED,
+         note: "历史 Bug：曾返回 500，已修复为 400"}
+      - {desc: "multipart 但缺 file 字段", expect: "400", confidence: CONFIRMED}
+      - {desc: "文件名含 ../../", expect: "500 + '非法的存储路径'（路径穿越防护）", confidence: CONFIRMED,
+         source: "LocalFileStorageService.java:69-71"}
+    output_format:
+      url_pattern: "/uploads/image/{yyyy}/{MM}/{32位hex}.{ext}"
+      rename_rule: "UUID 重命名，与原始文件名**无关**"
+      related_rules: [FILE-009, FILE-014]
+
+# ═════════════════════════════════════════════
+# 三、不存在的 ID / 特殊 ID 取值
+# ═════════════════════════════════════════════
+special_id_values:
+  desc: "路径参数 id 的标准测试取值"
+  values:
+    - {value: "不存在的正整数（如 999999999）", expect: "404（对应资源的 *_NOT_FOUND）", confidence: CONFIRMED,
+       note: "优先用大数，避免与自增 id 撞车"}
+    - {value: 0, expect: "404 或 400", confidence: UNKNOWN,
+       note: "0 是合法 Long，能匹配 {id:[0-9]+}，但库中无 id=0 → 预期 404。**未见测试验证**，见 issues.yaml U-03"}
+    - {value: -1, expect: "路径不匹配 → 404 '请求的资源不存在'", confidence: INFERRED,
+       note: "负号不匹配 [0-9]+ 正则"}
+    - {value: "abc", expect: "路径不匹配 → 404 '请求的资源不存在'", confidence: INFERRED}
+    - {value: "1.5", expect: "路径不匹配 → 404", confidence: INFERRED}
+    - {value: "9223372036854775808（Long.MAX+1）", expect: "400 '参数格式不正确：id' 或 404",
+       confidence: UNKNOWN, note: "溢出行为未验证，见 issues.yaml U-03"}
+  whitelist_regex_caveat: >-
+    ⚠️ 免登录白名单端点的路径模式是 {id:[0-9]+}（带正则），
+    非数字 id 会导致**路径不匹配**（404 "请求的资源不存在"），
+    而不是 400 "参数格式不正确：id"。两类端点的预期码不同，生成用例前先确认路径模式。
+
+# ═════════════════════════════════════════════
+# 四、禁止生成的数据（项目没有的功能）
+# ═════════════════════════════════════════════
+forbidden_test_data:
+  desc: "以下取值/字段对应**未实现的功能**，生成用例即为幻觉"
+  items:
+    - {item: "comment.parent_id / reply_to_user_id", reason: "列存在但功能未实现，API 不暴露",
+       forbidden_test: "楼中楼、回复评论", issue_ref: issues.yaml M-04}
+    - {item: "notification.type = 4 (MESSAGE)", reason: "@Deprecated 保留值，isValid() 只接受 1~3",
+       forbidden_test: "私信通知"}
+    - {item: "notification.message_id", reason: "列存在但一期未使用"}
+    - {item: "message.deleted（撤回）", reason: "列存在但无撤回 API", forbidden_test: "撤回消息"}
+    - {item: "report.target_type = 4 (REPORT)", reason: "举报 DTO @Max(3) 拦住；4 仅用于 admin_operation_log",
+       forbidden_test: "举报一条举报"}
+    - {item: "user.role 的写入", reason: "注册/改资料 DTO 均不暴露 role",
+       forbidden_test: "通过 API 把自己提权为管理员",
+       correct_test: "多传 role 字段 → 断言**未生效**（SEC-003 批量赋值防护）"}
+    - {item: "不存在的角色（moderator/superadmin/guest）", reason: "RoleEnum 只有 USER(1)/ADMIN(2)"}
+    - {item: "不存在的处置动作", reason: "ReportActionEnum 只有 NONE/DELETE_POST/DELETE_COMMENT/DISABLE_USER"}
+    - {item: "注册字段 phone/phone_number/wechat", reason: "RegisterRequest 无此字段，会被静默忽略"}
+    - {item: "GraphQL 查询", reason: "项目是 REST，无 GraphQL"}
+    - {item: "WebSocket / SSE 连接", reason: "项目无实时推送，通知靠轮询"}
+    - {item: "分页 size > 50", reason: "@Max(50) 拦住"}
+    - {item: "标记通知为未读", reason: "无此 API（isRead 只能 0→1）"}
+    - {item: "删除用户 / 删除会话 / 删除消息 / 删除举报", reason: "无对应 API"}

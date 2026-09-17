@@ -1,0 +1,1358 @@
+# Miqu API 端点事实清单（50 个端点 / 16 个 Controller）
+#
+# 用途：AI 生成自动化测试时，**只能调用本文件中存在的端点、只能使用本文件中列出的参数名**。
+# 消费者：
+#   LLM              → 拼装请求（method/path/params/body）
+#   Pydantic         → 校验 method/path/参数名是否真实存在
+#   BusinessValidator→ 校验参数约束与预期错误码
+#   CoverageValidator→ 统计 API 覆盖率（本文件是 50 个端点的权威清单）
+#   执行器           → 生成 client.get/post/put/delete 调用
+#
+# 真相来源：backend/src/main/java/com/miqu/controller/**（逐个 Controller 读取）
+#           backend/src/main/java/com/miqu/dto/**（Bean Validation 注解）
+#           backend/src/main/java/com/miqu/vo/**（响应结构）
+#           backend/src/main/java/com/miqu/service/impl/**（业务校验与错误码）
+#           docs/api/**（交叉验证，发现的不一致已记入 issues.yaml）
+#
+# confidence: CONFIRMED（全部端点、参数名、约束、错误码均在源码中逐字确认）
+#
+# 字段说明：
+#   id            端点唯一标识（供规则与覆盖矩阵引用）
+#   auth          anonymous（免登录）| user（需登录）| admin（需 @RequireAdmin）
+#   errors        该端点在源码中**实际可达**的 ErrorCode 名（不含不可达分支，不可达的在 note 说明）
+#   message_rule  参数校验失败时 message 的取值规则（见 error_codes.yaml 的 assertion_discipline）
+
+meta:
+  total_endpoints: 50
+  total_controllers: 16
+  cross_check: "与 docs/testing/MIQU_TEST_SYSTEM.md §5 及 TEST_COVERAGE_MATRIX.md 口径一致（50）"
+  http_status: "全部恒为 HTTP 200，业务结果看 body.code（唯一例外 /uploads/**，不在本清单内）"
+  conventions_ref: api/conventions.yaml
+  error_codes_ref: api/error_codes.yaml
+
+# 通用：所有需登录端点在下列情况会先被拦截，故不再逐条重复列出
+global_auth_errors:
+  - {code: 401, error_code: UNAUTHORIZED, when: "未携带 Token / Token 无效 / Token 过期"}
+  - {code: 423, error_code: USER_DISABLED, when: "Token 有效但账号已被禁用（每请求查库）"}
+  - {code: 401, error_code: USER_NOT_FOUND, when: "Token 有效但用户已被逻辑删除（实际返回 401）"}
+admin_global_errors:
+  - {code: 401, error_code: UNAUTHORIZED, when: "未登录"}
+  - {code: 403, error_code: FORBIDDEN, when: "已登录但 role != ADMIN(2)"}
+
+# ═══════════════════════════════════════════════════════════════
+# 模块 1：认证（AuthController，前缀 /api/auth，3 个端点）
+# ═══════════════════════════════════════════════════════════════
+auth:
+  controller: AuthController
+  class_prefix: /api/auth
+  source: backend/src/main/java/com/miqu/controller/AuthController.java
+  rule_domain_prefix: AUTH
+  yaml_registration_gap: true   # ⚠️ AUTH 域在 test_cases/*.yaml 中**完全未登记**，见 issues.yaml M-02
+
+  endpoints:
+    - "id: POST_AUTH_REGISTER"
+      name: 用户注册
+      method: POST
+      path: /api/auth/register
+      auth: anonymous
+      request_body:
+        dto: RegisterRequest
+        content_type: application/json
+        fields:
+          - {name: username, type: String, required: true, min: 4, max: 20,
+             pattern: "^[A-Za-z][A-Za-z0-9_]*$",
+             messages: {blank: "用户名不能为空",
+                        size: "用户名长度必须在 4~20 个字符之间",
+                        pattern: "用户名必须以字母开头，且只能含字母、数字和下划线"}}
+          - {name: password, type: String, required: true, min: 6, max: 20,
+             messages: {blank: "密码不能为空", size: "密码长度必须在 6~20 个字符之间"}}
+          - {name: nickname, type: String, required: true, max: 32,
+             messages: {blank: "昵称不能为空", size: "昵称长度不能超过 32 个字符"}}
+          - {name: email, type: String, required: true, max: 64, format: email,
+             messages: {blank: "邮箱不能为空", size: "邮箱长度不能超过 64 个字符",
+                        email: "邮箱格式不正确"}}
+          - {name: gender, type: Integer, required: false, min: 0, max: 2, default_when_absent: 0,
+             message: "性别取值只能是 0、1 或 2"}
+          - {name: birthday, type: "LocalDate(yyyy-MM-dd)", required: false}
+          - {name: bio, type: String, required: false, max: 255,
+             message: "个人简介长度不能超过 255 个字符"}
+          - {name: avatar, type: String, required: false, max: 255,
+             message: "头像地址长度不能超过 255 个字符"}
+        unknown_fields_behavior: "静默忽略（SER-06），多传 role/status 不会报错也不会生效"
+      response:
+        data_type: UserVO
+        vo_fields: [id(String), username, nickname, email, gender(Integer), birthday, bio,
+                    avatar, role(Integer), followingCount(int), followerCount(int),
+                    postCount(int), createTime]
+      success_side_effects:
+        - "插入 user 行"
+        - "role=1(USER)、status=1(NORMAL)、following_count=0、follower_count=0、post_count=0"
+        - "password 存 BCrypt 哈希，**响应中不返回 password**"
+        - "**不产生通知、不产生关注、不产生动态**"
+      errors:
+        - {code: 400, error_code: PARAM_INVALID, when: "任一字段校验失败", message_rule: "取第一个字段错误的自定义文案"}
+        - {code: 409, error_code: USERNAME_EXISTS, when: "用户名已存在"}
+        - {code: 409, error_code: EMAIL_EXISTS, when: "邮箱已注册"}
+      error_check_order: ["Bean Validation(400)", "username 查重(409)", "email 查重(409)"]
+      source_ref: [AuthServiceImpl.java:47-52, AuthServiceImpl.java:54-69]
+      related_rules: [AUTH-001, AUTH-002, AUTH-006]
+
+    - "id: POST_AUTH_LOGIN"
+      name: 用户登录
+      method: POST
+      path: /api/auth/login
+      auth: anonymous
+      request_body:
+        dto: LoginRequest
+        fields:
+          - {name: username, type: String, required: true, message_blank: "用户名不能为空"}
+          - {name: password, type: String, required: true, message_blank: "密码不能为空"}
+        note: "登录**不校验** username 的长度与格式，任意字符串都会走到查库"
+      response:
+        data_type: LoginVO
+        vo_fields:
+          - {name: token, type: String}
+          - {name: tokenType, type: String, fixed_value: Bearer}
+          - {name: expiresIn, type: long, fixed_value: 604800, serialized_as: number}
+          - {name: user, type: UserVO}
+      errors:
+        - {code: 400, error_code: PARAM_INVALID, when: "username 或 password 为空"}
+        - {code: 401, error_code: INVALID_CREDENTIALS, when: "用户名不存在**或**密码错误（故意合并，防枚举）"}
+        - {code: 423, error_code: USER_DISABLED, when: "凭证正确但 status=0"}
+      error_check_order:
+        - "1. Bean Validation(400)"
+        - "2. user==null || !matches(password) → 401 INVALID_CREDENTIALS  ← 合并判断"
+        - "3. !isNormal(status) → 423 USER_DISABLED"
+      critical_fact: >-
+        **密码校验先于状态校验**。所以"被禁用账号 + 错误密码"返回 **401** 而非 423。
+        设计意图是不暴露"此账号存在且被禁用"。见 AUTH-005。
+      source_ref: [AuthServiceImpl.java:77-95, AuthServiceImpl.java:82(注释)]
+      related_rules: [AUTH-003, AUTH-004, AUTH-005]
+
+    - "id: POST_AUTH_LOGOUT"
+      name: 退出登录
+      method: POST
+      path: /api/auth/logout
+      auth: user
+      request_body: null
+      response: {data_type: null, data_value: null}
+      errors: [{code: 401, error_code: UNAUTHORIZED, when: "未登录"}]
+      side_effects:
+        - "**服务端无任何操作**：JWT 无状态，不维护黑名单，不删 Token"
+        - "登出后原 Token 在 7 天内**仍然有效**"
+      critical_fact: >-
+        ⚠️ 这是本项目一个**容易被 AI 猜错**的点：logout 不会让 Token 失效。
+        不要生成"登出后用旧 Token 应返回 401"的用例——实际会返回 200。
+        唯一能让 Token 提前失效的途径是**禁用账号**或**逻辑删除用户**（每请求查库）。
+      confidence: CONFIRMED
+      source_ref: [AuthController.java(logout 方法), JwtAuthenticationFilter.java:68-69]
+      related_rules: [AUTH-007]
+
+# ═══════════════════════════════════════════════════════════════
+# 模块 2：用户（UserController，前缀 /api/users，13 个端点）
+# ═══════════════════════════════════════════════════════════════
+user:
+  controller: UserController
+  class_prefix: /api/users
+  source: backend/src/main/java/com/miqu/controller/UserController.java
+  rule_domain_prefixes: [USER, FOL, SRCH]
+  yaml_registration_gap: true   # ⚠️ USER 域在 test_cases/*.yaml 中未登记
+
+  endpoints:
+    - "id: GET_USERS_ME"
+      name: 获取当前用户资料
+      method: GET
+      path: /api/users/me
+      auth: user
+      explicitly_not_whitelisted: true
+      response: {data_type: UserVO}
+      errors: [{code: 401, error_code: UNAUTHORIZED}, {code: 423, error_code: USER_DISABLED},
+               {code: "404, error_code: USER_NOT_FOUND}]"
+      test_note: "获取当前用户 ID 的标准方式：data['id']（**字符串**）。几乎所有写操作用例都依赖它。"
+      source_ref: [UserController.java, UserServiceImpl.getCurrentUser]
+
+    - "id: PUT_USERS_ME"
+      name: 修改个人资料
+      method: PUT
+      path: /api/users/me
+      auth: user
+      request_body:
+        dto: UpdateProfileRequest
+        fields:
+          - {name: nickname, type: String, required: true, max: 32,
+             messages: {blank: "昵称不能为空", size: "昵称长度不能超过 32 个字符"}}
+          - {name: gender, type: Integer, required: false, min: 0, max: 2,
+             message: "性别取值只能是 0、1 或 2", null_meaning: "不修改"}
+          - {name: birthday, type: "LocalDate", required: false, null_meaning: "不修改"}
+          - {name: bio, type: String, required: false, max: 255,
+             message: "个人简介长度不能超过 255 个字符", null_meaning: "不修改"}
+        doc_conflict:
+          doc_claim: "Swagger 描述称'字段为 null 表示不修改'（暗示全部可选）"
+          code_reality: "nickname 有 @NotBlank，**不传 nickname 直接 400**"
+          verdict: "以代码为准：nickname 必填，其余三个可选"
+          issue_ref: issues.yaml C-06
+      response: {data_type: UserVO}
+      errors: [{code: 400, error_code: PARAM_INVALID}, {code: 401, error_code: UNAUTHORIZED},
+               {code: "423, error_code: USER_DISABLED}]"
+      mass_assignment_protection:
+        fact: "DTO 只暴露 nickname/gender/birthday/bio 四个字段（record 类型）"
+        consequence: "请求体多传 username/email/role/status **不会报错，但不会生效**（被 Jackson 忽略）"
+        assertion_rule: "断言'字段未被修改'，**不要**断言返回 400"
+        related_rule: SEC-003（test_cases 已登记为冻结安全用例）
+      source_ref: [dto/request/UpdateProfileRequest.java, UserServiceImpl.updateProfile]
+      related_rules: [USER-001, SEC-003]
+
+    - "id: PUT_USERS_ME_PASSWORD"
+      name: 修改密码
+      method: PUT
+      path: /api/users/me/password
+      auth: user
+      request_body:
+        dto: ChangePasswordRequest
+        fields:
+          - {name: oldPassword, type: String, required: true, message_blank: "原密码不能为空"}
+          - {name: newPassword, type: String, required: true, min: 6, max: 20,
+             messages: {blank: "新密码不能为空", size: "新密码长度必须在 6~20 个字符之间"}}
+      response: {data_type: null}
+      errors:
+        - {code: 400, error_code: PARAM_INVALID, when: "字段校验失败"}
+        - {code: 400, error_code: OLD_PASSWORD_MISMATCH, when: "原密码不正确"}
+        - {code: 400, error_code: PASSWORD_SAME_AS_OLD, when: "新密码与原密码相同"}
+        - {code: 401, error_code: UNAUTHORIZED}
+        - {code: 423, error_code: USER_DISABLED}
+      error_check_order: ["1. Bean Validation(400)", "2. 原密码匹配(400 OLD_PASSWORD_MISMATCH)",
+                          "3. 新旧相同(400 PASSWORD_SAME_AS_OLD)", "4. 更新"]
+      side_effects: ["更新 user.password（BCrypt 哈希）", "**不产生通知、不写管理日志**",
+                     "**不会使已签发的旧 Token 失效**（JWT 无状态）"]
+      test_note: >-
+        ⚠️ 改密码用 fresh_user，**绝不能用种子账号**——改了会污染所有依赖密码 123456 的用例。
+        且项目没有恢复密码的接口，改错无法回滚。
+      source_ref: [UserServiceImpl.java:71-88]
+      related_rules: [USER-002, USER-003]
+
+    - "id: PUT_USERS_ME_AVATAR"
+      name: 修改头像
+      method: PUT
+      path: /api/users/me/avatar
+      auth: user
+      request_body:
+        dto: UpdateAvatarRequest
+        fields:
+          - {name: avatar, type: String, required: true, max: 255,
+             messages: {blank: "头像地址不能为空", size: "头像地址长度不能超过 255 个字符"}}
+        service_layer_extra_check:
+          rule: "avatar.trim() 必须以 '/uploads/' 开头（前缀带尾部斜杠）"
+          error: {code: 400, error_code: INVALID_IMAGE_URL, message: "图片地址不合法，请先通过上传接口获取"}
+          source: UserServiceImpl.java:101-104
+      response: {data_type: UserVO}
+      errors:
+        - {code: 400, error_code: PARAM_INVALID, when: "avatar 为空或超 255 字符"}
+        - {code: 400, error_code: INVALID_IMAGE_URL, when: "不以 /uploads/ 开头"}
+        - {code: 401, error_code: UNAUTHORIZED}
+        - {code: 423, error_code: USER_DISABLED}
+      error_check_order: ["1. requireActiveUser(401/404/423)", "2. Bean Validation(400)",
+                          "3. 前缀校验(400 INVALID_IMAGE_URL)"]
+      doc_conflict:
+        doc_claim: >-
+          docs/api/users.md:290-291,335 称"头像 URL **不做** startsWith('/uploads/') 前缀校验"、
+          "当前实现不校验前缀，不要写外链 400 的断言"
+        code_reality: "UserServiceImpl.java:101-104 **明确校验**，外链返回 400 INVALID_IMAGE_URL"
+        verdict: "**以代码为准**。文档是 BUG-005（2026-09-14 修复）之前的旧描述，未同步更新"
+        severity: P0
+        ai_impact: "AI 若读文档会生成'外链头像应返回 200'的**反向错误**断言"
+        issue_ref: issues.yaml C-01
+      boundary_examples:
+        valid: ["/uploads/image/2026/09/abc.jpg"]
+        invalid_prefix_like: ["/uploads-evil/x.png", "/uploadsx/y.png", "uploads/z.png",
+                              "https://evil.com/uploads/x.png", "//uploads/x.png"]
+        note: "前缀比较是 startsWith('/uploads/')，带尾部斜杠，故 '/uploads-evil/' 会被拒"
+      related_rules: [USER-004, USER-005, SEC-011]
+      existing_cases: [SEC-011]   # test_cases 已登记，2026-09-14 由 gap 转 implemented
+
+    - "id: GET_USERS_ME_FOLLOWING"
+      name: 我的关注列表
+      method: GET
+      path: /api/users/me/following
+      auth: user
+      query_params: {inherits: PageQuery}
+      response: {data_type: "PageResult<UserFollowVO>",
+                 item_fields: [id(String), username, nickname, avatar, bio, followedByMe(boolean), createTime]}
+      errors: [{code: 401, error_code: UNAUTHORIZED}, {code: 423, error_code: USER_DISABLED}]
+
+    - "id: GET_USERS_ME_FOLLOWERS"
+      name: 我的粉丝列表
+      method: GET
+      path: /api/users/me/followers
+      auth: user
+      query_params: {inherits: PageQuery}
+      response: {data_type: "PageResult<UserFollowVO>"}
+      errors: [{code: 401, error_code: UNAUTHORIZED}, {code: 423, error_code: USER_DISABLED}]
+
+    - "id: GET_USERS_SEARCH"
+      name: 搜索用户
+      method: GET
+      path: /api/users/search
+      auth: anonymous
+      in_whitelist: true
+      query_params:
+        inherits: PageQuery
+        own:
+          - {name: keyword, type: String, required: true, max: 32,
+             messages: {blank: "搜索关键词不能为空", size: "搜索关键词不能超过 32 个字符"}}
+      response: {data_type: "PageResult<UserSearchVO>",
+                 item_fields: [id(String), username, nickname, avatar, bio, followerCount(int), followedByMe(boolean)]}
+      errors: [{code: 400, error_code: PARAM_INVALID, when: "keyword 为空或超 32 字符"}]
+      search_behavior:
+        matches_on: ["username", "nickname"]
+        sql_like_escaping:
+          fact: "使用 SqlLikeUtils.contains 对 % 和 _ 做转义"
+          consequence: "keyword='%' **不会**匹配全表；keyword='_' 不会被当通配符"
+          source: UserServiceImpl.java:182 + common/SqlLikeUtils.java
+        does_not_filter_status:
+          fact: "search 用 selectPage，**不过滤 status**"
+          consequence: "**被禁用的用户仍会被搜到**（但逻辑删除的不会）"
+          source: UserServiceImpl.java:185-191
+        does_not_filter_deleted:
+          fact: "MyBatis-Plus @TableLogic 自动加 deleted=0，已注销用户搜不到"
+      related_rules: [USER-006, USER-007, SEC-006]
+      existing_cases: [SEC-006]
+
+    - "id: GET_USERS_ID"
+      name: 用户主页
+      method: GET
+      path: /api/users/{id}
+      path_params: [{name: id, type: Long, in_path_pattern: "{id:[0-9]+}"}]
+      auth: anonymous
+      in_whitelist: true
+      response:
+        data_type: UserProfileVO
+        vo_fields: [id(String), username, nickname, gender(Integer), bio, avatar,
+                    followingCount(int), followerCount(int), postCount(int),
+                    followedByMe(boolean), followingMe(boolean), mutual(boolean), createTime]
+        note: "**不返回 email**（隐私），与 UserVO 不同"
+      errors: [{code: 404, error_code: USER_NOT_FOUND, when: "用户不存在或已逻辑删除"}]
+      disabled_user_behavior:
+        fact: "使用 requireVisibleUser，**禁用用户的主页仍可正常访问**（返回 200）"
+        source: UserServiceImpl.java:132-142
+        related_rule: USER-011
+      relation_flags_note: >-
+        followedByMe / followingMe / mutual 三个布尔依赖当前登录态。
+        未登录访问时三者恒为 false（FollowStatusLoader 无 currentUserId）。
+        → 测这三个字段必须带 Token。
+
+    - "id: GET_USERS_ID_POSTS"
+      name: 某用户的动态
+      method: GET
+      path: /api/users/{id}/posts
+      path_params: [{name: id, type: Long}]
+      auth: anonymous
+      in_whitelist: true
+      query_params: {inherits: PageQuery}
+      response: {data_type: "PageResult<PostVO>"}
+      errors: [{code: 404, error_code: USER_NOT_FOUND}]
+
+    - "id: GET_USERS_ID_FOLLOWING"
+      name: 某用户的关注列表
+      method: GET
+      path: /api/users/{id}/following
+      path_params: [{name: id, type: Long}]
+      auth: anonymous
+      in_whitelist: true
+      query_params: {inherits: PageQuery}
+      response: {data_type: "PageResult<UserFollowVO>"}
+      errors: [{code: 404, error_code: USER_NOT_FOUND}]
+
+    - "id: GET_USERS_ID_FOLLOWERS"
+      name: 某用户的粉丝列表
+      method: GET
+      path: /api/users/{id}/followers
+      path_params: [{name: id, type: Long}]
+      auth: anonymous
+      in_whitelist: true
+      query_params: {inherits: PageQuery}
+      response: {data_type: "PageResult<UserFollowVO>"}
+      errors: [{code: 404, error_code: USER_NOT_FOUND}]
+
+    - "id: POST_USERS_ID_FOLLOW"
+      name: 关注用户
+      method: POST
+      path: /api/users/{id}/follow
+      path_params: [{name: id, type: Long, desc: "被关注者 ID"}]
+      auth: user
+      request_body: null
+      response: {data_type: FollowResultVO, vo_fields: [followed(boolean), followerCount(int)]}
+      errors:
+        - {code: 400, error_code: CANNOT_FOLLOW_SELF, when: "id == 当前用户 ID"}
+        - {code: 404, error_code: USER_NOT_FOUND, when: "目标不存在或已逻辑删除"}
+        - {code: 423, error_code: USER_DISABLED, when: "目标被禁用**或**自己被禁用"}
+        - {code: 409, error_code: ALREADY_FOLLOWED, when: "已关注（Service 先查 + 唯一键兜底）"}
+        - {code: 401, error_code: UNAUTHORIZED}
+      error_check_order:
+        - "1. currentUserId == null → 401"
+        - "2. currentUserId.equals(targetUserId) → 400 CANNOT_FOLLOW_SELF"
+        - "3. requireActiveUser(currentUserId) → 404/423"
+        - "4. requireActiveUser(targetUserId) → 404/423"
+        - "5. isFollowing(current,target) → 409 ALREADY_FOLLOWED"
+        - "6. insert（uk_follower_following 兜底 → 409 ALREADY_FOLLOWED）"
+      side_effects:
+        - "插入 follow 行"
+        - "incrFollowingCount(currentUserId)"
+        - "incrFollowerCount(targetUserId)"
+        - "插入 notification(type=1 FOLLOW) 给目标用户（**自己不通知自己**）"
+      source_ref: [FollowServiceImpl.java:46-72]
+      related_rules: [FOL-001, FOL-004, FOL-005, FOL-006, FOL-007]
+      existing_cases: [FOL-001, FOL-004, FOL-005, FOL-006, CONC-001]
+
+    - "id: DELETE_USERS_ID_FOLLOW"
+      name: 取消关注
+      method: DELETE
+      path: /api/users/{id}/follow
+      path_params: [{name: id, type: Long}]
+      auth: user
+      request_body: null
+      response: {data_type: FollowResultVO}
+      errors:
+        - {code: 404, error_code: USER_NOT_FOUND, when: "目标不存在"}
+        - {code: 404, error_code: NOT_FOLLOWED, when: "尚未关注"}
+        - {code: 401, error_code: UNAUTHORIZED}
+      side_effects:
+        - "**物理删除** follow 行（无 deleted 列，唯一键立即释放）"
+        - "decrFollowingCount / decrFollowerCount"
+        - "**物理删除**对应的 notification(type=1)（removeFollowNotification）"
+      critical_fact: >-
+        取消关注后**可立即重新关注**（FOL-002），因为 follow 表是物理删除。
+        这是"软删除假设"会导致 AI 生成错误用例的典型点。
+      mutual_follow_impact: >-
+        ⚠️ 取消任一方关注会**破坏互关状态**，导致私信立即不可发（403 NOT_MUTUAL_FOLLOW），
+        但**已有会话与历史消息仍可读**（CONV/MSG 冻结规则）。
+        这是本项目最重要的 workflow 之一，见 workflows/workflows.yaml WF-03。
+      source_ref: [FollowServiceImpl.java:87-96]
+      related_rules: [FOL-002, FOL-003]
+      existing_cases: [FOL-002, FOL-003]
+
+# ═══════════════════════════════════════════════════════════════
+# 模块 3：动态（PostController，前缀 /api/posts，7 个端点）
+# ═══════════════════════════════════════════════════════════════
+post:
+  controller: PostController
+  class_prefix: /api/posts
+  source: backend/src/main/java/com/miqu/controller/PostController.java
+  rule_domain_prefixes: [POST, LIKE]
+  yaml_registration_gap: true   # ⚠️ POST 域未登记（LIKE 已登记 4 条）
+
+  endpoints:
+    - "id: POST_POSTS"
+      name: 发布动态
+      method: POST
+      path: /api/posts
+      auth: user
+      request_body:
+        dto: PostCreateRequest
+        fields:
+          - {name: content, type: String, required: false, max: 1000,
+             message: "动态内容不能超过 1000 个字符", null_treated_as: "空串"}
+          - {name: images, type: "List<String>", required: false, max_elements: 9,
+             message: "最多只能上传 9 张图片",
+             element_rule: "每个元素 trim 后过滤空串；剩余每个 URL 必须 startsWith('/uploads/')"}
+        cross_field_rule:
+          rule: "content 与 images 过滤后**至少一个非空**"
+          error: {code: 400, error_code: EMPTY_POST, message: "动态内容与图片不能同时为空"}
+          source: PostServiceImpl.java:70-72
+      response:
+        data_type: PostVO
+        vo_fields: [id(String), content, "images(List<String>,有序)", likeCount(int),
+                    commentCount(int), likedByMe(boolean), mine(boolean),
+                    "author(UserBriefVO)", createTime]
+        author_vo_fields: [id(String), username, nickname, avatar, bio]
+      errors:
+        - {code: 400, error_code: PARAM_INVALID, when: "content 超 1000 或 images 超 9 个"}
+        - {code: 400, error_code: EMPTY_POST, when: "内容与图片同时为空"}
+        - {code: 400, error_code: TOO_MANY_IMAGES, when: "Service 层图片数校验"}
+        - {code: 400, error_code: INVALID_IMAGE_URL, when: "任一图片 URL 不以 /uploads/ 开头"}
+        - {code: 401, error_code: UNAUTHORIZED}
+        - {code: 423, error_code: USER_DISABLED}
+      error_check_order:
+        - "1. Bean Validation（@Size content≤1000、@Size images≤9）→ 400 PARAM_INVALID"
+        - "2. content 与 images 均空 → 400 EMPTY_POST"
+        - "3. images.size() > 9 → 400 TOO_MANY_IMAGES（DTO 已拦，此分支通常不可达）"
+        - "4. 图片 URL 前缀校验 → 400 INVALID_IMAGE_URL"
+      reachability_note: >-
+        ⚠️ TOO_MANY_IMAGES 的 Service 分支在正常路径下**不可达**：
+        DTO 的 @Size(max=9) 会先拦为 PARAM_INVALID(400)。
+        但两者 message 文案**字面相同**（都是"最多只能上传 9 张图片"），
+        所以断言 code=400 + 该文案是安全的，只是**不要**声称触发了 TOO_MANY_IMAGES。
+      side_effects:
+        - "插入 post 行（image_count = 过滤后图片数）"
+        - "为每张图片插入 post_image 行，sort_order = 0..n-1"
+        - "incrPostCount(userId)"
+        - "**不产生通知**（发帖不通知粉丝）—— 这是易猜错点"
+      source_ref: [PostServiceImpl.java:70-98, PostServiceImpl.java:318-325]
+      related_rules: [POST-001, POST-002, POST-003, SEC-007]
+      existing_cases: [SEC-007]
+
+    - "id: GET_POSTS"
+      name: 动态流
+      method: GET
+      path: /api/posts
+      auth: "anonymous（tab=latest）/ user（tab=following）"
+      in_whitelist: true
+      whitelist_caveat: "路径在白名单，但 tab=following 时**由 Service 层**拦 401"
+      query_params:
+        inherits: PageQuery
+        own:
+          - {name: tab, type: String, default: latest, pattern: "latest|following",
+             message: "tab 取值只能是 latest 或 following"}
+      response: {data_type: "PageResult<PostVO>"}
+      errors:
+        - {code: 400, error_code: PARAM_INVALID, when: "tab 不是 latest/following"}
+        - {code: 401, error_code: UNAUTHORIZED, when: "**仅 tab=following** 且未登录"}
+      tab_behavior:
+        latest: {desc: "全部动态按时间倒序", auth_required: false}
+        following: {desc: "仅关注的人的动态", auth_required: true,
+                    source: PostServiceImpl.java:135-137}
+      critical_fact: >-
+        ⚠️ 同一端点、同一 HTTP 方法，**认证要求随查询参数变化**。
+        这是本项目唯一的"条件认证"端点，AI 极易统一按 anonymous 处理而漏掉 401 用例。
+      related_rules: [POST-006]
+
+    - "id: GET_POSTS_ID"
+      name: 动态详情
+      method: GET
+      path: /api/posts/{id}
+      path_params: [{name: id, type: Long, in_path_pattern: "{id:[0-9]+}"}]
+      auth: anonymous
+      in_whitelist: true
+      response: {data_type: PostVO}
+      errors: [{code: 404, error_code: POST_NOT_FOUND, when: "不存在或已逻辑删除"}]
+
+    - "id: DELETE_POSTS_ID"
+      name: 删除动态
+      method: DELETE
+      path: /api/posts/{id}
+      path_params: [{name: id, type: Long}]
+      auth: user
+      authorization_rule: "**作者本人 OR 管理员**（CurrentUserHolder.isAdmin()）"
+      request_body: null
+      response: {data_type: null}
+      errors:
+        - {code: 404, error_code: POST_NOT_FOUND, when: "不存在"}
+        - {code: 403, error_code: FORBIDDEN, when: "非作者且非管理员"}
+        - {code: 401, error_code: UNAUTHORIZED}
+      error_check_order: ["1. 查 post（404）", "2. isAuthor || isAdmin（403）", "3. 删除"]
+      side_effects:
+        - "逻辑删除 post（deleted=1）"
+        - "**逻辑删除**该动态下全部 comment"
+        - "**物理删除** post_image 行"
+        - "**物理删除** post_like 行"
+        - "decrPostCount(authorId)"
+        - "**物理删除** type=2(点赞)/type=3(评论) 且 post_id 匹配的 notification"
+      source_ref: [PostServiceImpl.java:106-122]
+      related_rules: [POST-004, POST-005, SEC-009]
+      existing_cases: [SEC-009]
+      test_note: >-
+        ⚠️ 级联副作用多，是数据库层断言的高价值目标。
+        但删种子 post 1 会破坏大量绝对值断言——**只用 fresh_user 建的动态测删除**。
+        历史踩坑：conftest 的 anonymous 夹具若写成 session 级，会因 Token 污染真删 post 1。
+
+    - "id: GET_POSTS_ID_LIKES"
+      name: 点赞用户列表
+      method: GET
+      path: /api/posts/{id}/likes
+      path_params: [{name: id, type: Long}]
+      auth: anonymous
+      in_whitelist: true
+      query_params: {inherits: PageQuery}
+      response: {data_type: "PageResult<UserBriefVO>"}
+      errors: [{code: 404, error_code: POST_NOT_FOUND}]
+
+    - "id: POST_POSTS_ID_LIKE"
+      name: 点赞动态
+      method: POST
+      path: /api/posts/{id}/like
+      path_params: [{name: id, type: Long}]
+      auth: user
+      request_body: null
+      response: {data_type: LikeResultVO, vo_fields: [liked(boolean), likeCount(int)]}
+      errors:
+        - {code: 404, error_code: POST_NOT_FOUND}
+        - {code: 409, error_code: ALREADY_LIKED, when: "已点赞（Service 先查 + uk_post_user 兜底）"}
+        - {code: 401, error_code: UNAUTHORIZED}
+        - {code: 423, error_code: USER_DISABLED}
+      side_effects:
+        - "插入 post_like 行"
+        - "incrLikeCount(postId)"
+        - "插入 notification(type=2 LIKE) 给作者（**自己不通知自己**）"
+      count_consistency: "likeCount 用 freshLikeCount() 重新查库取最新值，避免并发脏读"
+      source_ref: [PostServiceImpl.java:198-212, PostServiceImpl.java:333-336]
+      related_rules: [LIKE-001, LIKE-004, NOTI-004]
+      existing_cases: [LIKE-001, LIKE-004, CONC-002]
+
+    - "id: DELETE_POSTS_ID_LIKE"
+      name: 取消点赞
+      method: DELETE
+      path: /api/posts/{id}/like
+      path_params: [{name: id, type: Long}]
+      auth: user
+      request_body: null
+      response: {data_type: LikeResultVO}
+      errors:
+        - {code: 404, error_code: POST_NOT_FOUND}
+        - {code: 404, error_code: NOT_LIKED, when: "尚未点赞（deleted==0）"}
+        - {code: 401, error_code: UNAUTHORIZED}
+      side_effects:
+        - "**物理删除** post_like 行（释放 uk_post_user）"
+        - "decrLikeCount(postId)"
+        - "**物理删除**对应 notification(type=2)"
+      critical_fact: "取消后可立即重新点赞（LIKE-002），因物理删除。"
+      source_ref: [PostServiceImpl.java:224-232]
+      related_rules: [LIKE-002, LIKE-003]
+      existing_cases: [LIKE-002, LIKE-003]
+
+# ═══════════════════════════════════════════════════════════════
+# 模块 4：评论（CommentController，前缀 /api，3 个端点）
+# ═══════════════════════════════════════════════════════════════
+comment:
+  controller: CommentController
+  class_prefix: /api
+  source: backend/src/main/java/com/miqu/controller/CommentController.java
+  rule_domain_prefix: CMT
+  yaml_registration_gap: true   # ⚠️ CMT 域未登记
+
+  endpoints:
+    - "id: POST_POSTS_ID_COMMENTS"
+      name: 发表评论
+      method: POST
+      path: /api/posts/{id}/comments
+      path_params: [{name: id, type: Long, desc: "动态 ID"}]
+      auth: user
+      request_body:
+        dto: CommentCreateRequest
+        fields:
+          - {name: content, type: String, required: true, max: 500,
+             messages: {blank: "评论内容不能为空", size: "评论内容不能超过 500 个字符"}}
+      response:
+        data_type: CommentVO
+        vo_fields: [id(String), postId(String), content, mine(boolean),
+                    "author(UserBriefVO)", createTime]
+        critical_note: >-
+          ⚠️ CommentVO **没有独立的 userId 字段**，作者 ID 要从 data['author']['id'] 取（字符串）。
+          AI 极易写成 data['userId'] 而 KeyError。
+      errors:
+        - {code: 400, error_code: PARAM_INVALID, when: "content 为空或超 500",
+           message_actual: "评论内容不能为空 / 评论内容不能超过 500 个字符"}
+        - {code: 404, error_code: POST_NOT_FOUND, when: "动态不存在"}
+        - {code: 401, error_code: UNAUTHORIZED}
+        - {code: 423, error_code: USER_DISABLED}
+      dead_error_code_note: >-
+        ⚠️ ErrorCode.EMPTY_COMMENT（文案"评论内容不能为空"）是**死枚举，全库无引用**。
+        空评论实际由 DTO @NotBlank 触发 PARAM_INVALID(400)。
+        巧合的是**文案字面相同**，所以断言 message 会通过，
+        但规则溯源必须写 PARAM_INVALID / CommentCreateRequest，不要写 EMPTY_COMMENT。
+        见 issues.yaml C-02。
+      side_effects:
+        - "插入 comment 行"
+        - "incrCommentCount(postId)"
+        - "插入 notification(type=3 COMMENT) 给动态作者（**评论自己不通知**）"
+      unused_schema_columns:
+        - {column: comment.parent_id, status: "预留，一期未使用，API 不暴露"}
+        - {column: comment.reply_to_user_id, status: "预留，一期未使用，API 不暴露"}
+      # ⚠️ 2026-09-17 修正：本行原缩进为 8 空格（与上两行的 `- ` 同级），
+      #    会被解析成序列的元素而非兄弟键，导致 PyYAML 报
+      #    "expected <block end>, but found '?'"。已改回 6 空格对齐父键。
+      test_implication: "**不要生成楼中楼/回复评论的用例**——功能未实现，无对应参数"
+      source_ref: [CommentServiceImpl.java:56-60, dto/request/CommentCreateRequest.java]
+      related_rules: [CMT-001, NOTI-004]
+
+    - "id: GET_POSTS_ID_COMMENTS"
+      name: 评论列表
+      method: GET
+      path: /api/posts/{id}/comments
+      path_params: [{name: id, type: Long}]
+      auth: anonymous
+      in_whitelist: true
+      query_params: {inherits: PageQuery}
+      response: {data_type: "PageResult<CommentVO>"}
+      errors: [{code: 404, error_code: POST_NOT_FOUND}]
+
+    - "id: DELETE_COMMENTS_ID"
+      name: 删除评论
+      method: DELETE
+      path: /api/comments/{id}
+      path_params: [{name: id, type: Long, desc: "评论 ID（注意不是 post id）"}]
+      auth: user
+      authorization_rule: "**作者本人 OR 管理员**"
+      request_body: null
+      response: {data_type: null}
+      errors:
+        - {code: 404, error_code: COMMENT_NOT_FOUND, when: "不存在或已逻辑删除"}
+        - {code: 403, error_code: FORBIDDEN, when: "非作者且非管理员"}
+        - {code: 401, error_code: UNAUTHORIZED}
+      error_check_order: ["1. selectById（404）", "2. isAuthor || isAdmin（403）", "3. 删除"]
+      side_effects:
+        - "逻辑删除 comment（deleted=1）"
+        - "decrCommentCount(postId) —— **仅当 post 仍存在时**"
+      source_ref: [CommentServiceImpl.java:101-117]
+      related_rules: [CMT-002, CMT-003, CMT-004]
+      existing_cases: [CMT-002, CMT-003, SEC-010]
+      path_note: >-
+        ⚠️ 路径是 /api/comments/{id}（评论自己的资源路径），
+        **不是** /api/posts/{postId}/comments/{id}。AI 容易按 REST 直觉拼错。
+
+# ═══════════════════════════════════════════════════════════════
+# 模块 5：会话（ConversationController，前缀 /api/conversations，4 个端点）
+# ═══════════════════════════════════════════════════════════════
+conversation:
+  controller: ConversationController
+  class_prefix: /api/conversations
+  source: backend/src/main/java/com/miqu/controller/ConversationController.java
+  rule_domain_prefix: CONV
+  yaml_registered: true   # ✅ CONV-001~013 已在 core_business_rules.yaml 登记
+  domain_boundary_rule: >-
+    CONV 与 MSG 的分界（test_cases/TEST_CASE_SCHEMA.md §3 有意写死）：
+    **凡"能不能打开会话/是不是会话成员"归 CONV；凡"能不能发/能不能读消息"归 MSG。**
+    此前 CONV-007/008 出现过同一行为被两条 ID 各描述一遍的冲突，根因就是没定分界。
+
+  endpoints:
+    - "id: GET_CONVERSATIONS"
+      name: 会话列表
+      method: GET
+      path: /api/conversations
+      auth: user
+      query_params: {inherits: PageQuery}
+      response:
+        data_type: "PageResult<ConversationVO>"
+        item_fields: [id(String), "partner(UserBriefVO)", lastMessagePreview(String),
+                      lastMessageTime, unreadCount(int)]
+        note: "unreadCount 是**当前登录用户**那一侧的未读数（user1_unread 或 user2_unread）"
+      errors: [{code: 401, error_code: UNAUTHORIZED}, {code: 423, error_code: USER_DISABLED}]
+
+    - "id: POST_CONVERSATIONS"
+      name: 打开/创建会话
+      method: POST
+      path: /api/conversations
+      auth: user
+      extra_authorization: "**需与目标互相关注**"
+      request_body:
+        dto: CreateConversationRequest
+        fields:
+          - {name: targetUserId, type: Long, required: true, message_blank: "对方用户不能为空"}
+      response: {data_type: ConversationVO}
+      errors:
+        - {code: 400, error_code: CANNOT_MESSAGE_SELF, when: "targetUserId == 当前用户"}
+        - {code: 404, error_code: USER_NOT_FOUND, when: "目标不存在"}
+        - {code: 423, error_code: USER_DISABLED, when: "目标或自己被禁用"}
+        - {code: 403, error_code: NOT_MUTUAL_FOLLOW, when: "非互关（**冻结规则**）"}
+        - {code: 401, error_code: UNAUTHORIZED}
+      error_check_order:
+        - "1. requireActiveUser(userId) → 401/404/423"
+        - "2. userId.equals(targetUserId) → 400 CANNOT_MESSAGE_SELF"
+        - "3. requireActiveUser(targetUserId) → 404/423"
+        - "4. !isMutual(userId,targetUserId) → 403 NOT_MUTUAL_FOLLOW"
+      idempotency:
+        fact: "同一对用户**只有一个会话**（uk_users 唯一键 + CHECK user1_id < user2_id）"
+        behavior: "重复调用返回**同一个** conversation id，不新建"
+        concurrency: "并发首建用 TransactionTemplate(REQUIRES_NEW) 重查，避免 REPEATABLE READ 快照读看不到并发提交而误报 409"
+        source: ConversationServiceImpl.java:49-55,172-195
+        related_rule: CONC-005
+      source_ref: [ConversationServiceImpl.java:94-107]
+      related_rules: [CONV-001, CONV-014]
+      existing_cases: [CONV-001, CONV-002, CONV-003, CONV-004, CONV-005, CONV-006,
+                       CONV-007, CONV-008, CONV-009, CONV-010, CONV-011, CONV-012, CONV-013]
+
+    - "id: GET_CONVERSATIONS_ID_MESSAGES"
+      name: 读取会话消息（游标分页）
+      method: GET
+      path: /api/conversations/{id}/messages
+      path_params: [{name: id, type: Long, desc: "会话 ID"}]
+      auth: user
+      extra_authorization: "**必须是会话参与者**（requireMember）"
+      query_params:
+        style: cursor
+        does_not_inherit_page_query: true
+        fields:
+          - {name: beforeId, type: Long, required: false, min: 1, message: "beforeId 必须大于 0",
+             desc: "首次不传；之后传上一页最早一条的 id"}
+          - {name: size, type: Integer, default: 20, min: 1, max: 50,
+             messages: {min: "每页条数必须大于 0", max: "每页条数不能超过 50"}}
+      response:
+        data_type: "List<MessageVO>"
+        is_page_result: false
+        critical_note: >-
+          ⚠️ **返回裸数组，不是 PageResult**。data 直接是 list，
+          不要写 data['list']、data['total']、data['hasNext']——都不存在。
+          这是全项目唯一这样的端点。
+        item_fields: [id(String), conversationId(String), senderId(String), receiverId(String),
+                      content, mine(boolean), isRead(boolean), createTime]
+      errors:
+        - {code: 404, error_code: CONVERSATION_NOT_FOUND, when: "会话不存在"}
+        - {code: 403, error_code: NOT_CONVERSATION_MEMBER, when: "非参与者"}
+        - {code: 401, error_code: UNAUTHORIZED}
+      frozen_rule_note: >-
+        ⚠️ 取消互关后**历史消息仍可读**（冻结规则）。
+        互关校验只在"发消息"和"打开会话"时做，**读消息不做互关校验**，只做成员校验。
+        这是 AI 最易猜错的点：会误以为取消互关后连历史都读不了。
+      related_rules: [CONV-009, MSG-013]
+      existing_cases: [CONV-009, CONV-010, MSG-013]
+
+    - "id: PUT_CONVERSATIONS_ID_READ"
+      name: 标记会话已读
+      method: PUT
+      path: /api/conversations/{id}/read
+      path_params: [{name: id, type: Long}]
+      auth: user
+      extra_authorization: "**必须是会话参与者**"
+      request_body: null
+      response: {data_type: null}
+      errors:
+        - {code: 404, error_code: CONVERSATION_NOT_FOUND}
+        - {code: 403, error_code: NOT_CONVERSATION_MEMBER}
+        - {code: 401, error_code: UNAUTHORIZED}
+      side_effects:
+        - "把该会话中 receiver_id = 当前用户 且 is_read=0 的 message 全部置 is_read=1"
+        - "把 conversation 中当前用户那一侧的 unread 计数置 0（user1_unread 或 user2_unread）"
+      idempotency: "重复调用无副作用（已是 0 则仍为 0）"
+      source_ref: [ConversationServiceImpl.java:133-150]
+      related_rules: [CONV-011, CONV-012]
+
+# ═══════════════════════════════════════════════════════════════
+# 模块 6：私信（MessageController，前缀 /api/messages，2 个端点）
+# ═══════════════════════════════════════════════════════════════
+message:
+  controller: MessageController
+  class_prefix: /api/messages
+  source: backend/src/main/java/com/miqu/controller/MessageController.java
+  rule_domain_prefix: MSG
+  yaml_registered: true   # ✅ MSG-001~014 已登记
+  frozen_rule: "私信要求双方互相关注 —— 项目最高优先级冻结规则"
+
+  endpoints:
+    - "id: POST_MESSAGES"
+      name: 发送私信
+      method: POST
+      path: /api/messages
+      auth: user
+      extra_authorization: "**需与接收者互相关注**（冻结规则）"
+      request_body:
+        dto: MessageSendRequest
+        fields:
+          - {name: receiverId, type: Long, required: true, message_blank: "接收者不能为空"}
+          - {name: content, type: String, required: true, max: 1000,
+             messages: {blank: "消息内容不能为空", size: "消息内容不能超过 1000 个字符"}}
+      response: {data_type: MessageVO}
+      errors:
+        - {code: 400, error_code: PARAM_INVALID, when: "content 为空/超 1000，或 receiverId 为空"}
+        - {code: 400, error_code: CANNOT_MESSAGE_SELF, when: "receiverId == 当前用户"}
+        - {code: 404, error_code: USER_NOT_FOUND, when: "接收者不存在"}
+        - {code: 423, error_code: USER_DISABLED, when: "接收者或自己被禁用"}
+        - {code: 403, error_code: NOT_MUTUAL_FOLLOW, when: "非互关"}
+        - {code: 401, error_code: UNAUTHORIZED}
+      error_check_order:
+        - "0. **Bean Validation（Controller 层，最先）** → 400 PARAM_INVALID"
+        - "1. requireActiveUser(senderId) → 401/404/423"
+        - "2. userId.equals(receiverId) → 400 CANNOT_MESSAGE_SELF"
+        - "3. requireActiveUser(receiverId) → 404/423"
+        - "4. !isMutual(userId,receiverId) → 403 NOT_MUTUAL_FOLLOW"
+        - "5. content.isEmpty() → 400（Service 层，通常不可达，DTO 已拦）"
+      critical_fact_corrected: >-
+        ⚠️ **已纠偏的历史错误结论**：曾记录"非互关 + 空内容 = 403"，
+        2026-09-14 实测为 **400**——因为 DTO 的 @NotBlank 在 Controller 层**先于**
+        Service 的互关校验执行。TEST_COVERAGE_MATRIX.md 已修正此条。
+        → 生成"叠加违规"用例时必须先读 rules/validation_order.yaml。
+      side_effects:
+        - "getOrCreateEntity：会话不存在则创建（user1_id < user2_id 自动排序）"
+        - "插入 message 行（is_read=0）"
+        - "updateOnNewMessage：**原子 SQL** 更新 last_message_id / last_message_preview（截断至 100 字符）/ last_message_time / 接收方 unread + 1"
+        - "**不产生 notification**（NotificationTypeEnum.MESSAGE=4 是 @Deprecated 保留值，一期不用）"
+      source_ref: [MessageServiceImpl.java:43-82, MessageSendRequest.java:24-25]
+      related_rules: [MSG-001, MSG-002, MSG-003, MSG-011, MSG-014, MSG-015, MSG-016, MSG-017]
+      existing_cases: [MSG-001, MSG-002, MSG-003, MSG-004, MSG-005, MSG-006, MSG-007,
+                       MSG-008, MSG-009, MSG-010, MSG-011, MSG-012, MSG-013, MSG-014]
+
+    - "id: GET_MESSAGES_UNREAD_COUNT"
+      name: 私信未读总数
+      method: GET
+      path: /api/messages/unread-count
+      auth: user
+      response:
+        data_type: MessageUnreadVO
+        vo_fields: [{name: total, type: long, serialized_as: number}]
+        note: "只有 total 一个字段（与 NotificationUnreadVO 不同，后者有 4 个）"
+      errors: [{code: 401, error_code: UNAUTHORIZED}]
+
+# ═══════════════════════════════════════════════════════════════
+# 模块 7：通知（NotificationController，前缀 /api/notifications，4 个端点）
+# ═══════════════════════════════════════════════════════════════
+notification:
+  controller: NotificationController
+  class_prefix: /api/notifications
+  source: backend/src/main/java/com/miqu/controller/NotificationController.java
+  rule_domain_prefix: NOTI
+  yaml_registration_gap: true   # ⚠️ NOTI 域未登记
+
+  endpoints:
+    - "id: GET_NOTIFICATIONS"
+      name: 通知列表
+      method: GET
+      path: /api/notifications
+      auth: user
+      query_params:
+        inherits: PageQuery
+        own:
+          - {name: type, type: Integer, required: false, min: 1, max: 3,
+             message: "通知类型只能是 1、2 或 3", mapping: "1=关注 2=点赞 3=评论"}
+          - {name: isRead, type: Integer, required: false, min: 0, max: 1,
+             message: "已读状态只能是 0 或 1", mapping: "0=未读 1=已读"}
+      response:
+        data_type: "PageResult<NotificationVO>"
+        item_fields: [id(String), type(Integer), "actor(UserBriefVO)", postId(String|null),
+                      commentId(String|null), content(String), isRead(boolean), createTime]
+      errors: [{code: 400, error_code: PARAM_INVALID}, {code: 401, error_code: UNAUTHORIZED}]
+      scope_note: "只返回**当前登录用户**收到的通知（user_id = currentUserId），无法查他人通知"
+      deprecated_type_note: >-
+        ⚠️ type=4（MESSAGE 私信通知）是 @Deprecated 保留值，isValid() 只接受 1/2/3，
+        DTO 的 @Max(3) 也会拦。**不要生成 type=4 的用例**。
+
+    - "id: GET_NOTIFICATIONS_UNREAD_COUNT"
+      name: 通知未读分类计数
+      method: GET
+      path: /api/notifications/unread-count
+      auth: user
+      response:
+        data_type: NotificationUnreadVO
+        vo_fields:
+          - {name: total, type: long, serialized_as: number}
+          - {name: follow, type: long, serialized_as: number}
+          - {name: like, type: long, serialized_as: number}
+          - {name: comment, type: long, serialized_as: number}
+        note: "四个字段都是基本类型 long → JSON **数字**，不是字符串"
+      errors: [{code: 401, error_code: UNAUTHORIZED}]
+
+    - "id: PUT_NOTIFICATIONS_ID_READ"
+      name: 标记单条通知已读
+      method: PUT
+      path: /api/notifications/{id}/read
+      path_params: [{name: id, type: Long}]
+      auth: user
+      authorization_rule: "**通知接收者必须是当前用户**"
+      request_body: null
+      response: {data_type: null}
+      errors:
+        - {code: 404, error_code: NOTIFICATION_NOT_FOUND, when: "不存在"}
+        - {code: 403, error_code: FORBIDDEN, when: "notification.userId != currentUserId"}
+        - {code: 401, error_code: UNAUTHORIZED}
+      error_check_order: ["1. selectById（404）", "2. userId 匹配（403）", "3. 已读则直接 return", "4. 更新"]
+      idempotency: "isRead 已为 1 时**直接返回，不执行 UPDATE**（NotificationServiceImpl.java:155-157）"
+      source_ref: [NotificationServiceImpl.java:144-163]
+      related_rules: [NOTI-001, NOTI-002, NOTI-003, SEC-008]
+      existing_cases: [SEC-008]
+
+    - "id: PUT_NOTIFICATIONS_READ_ALL"
+      name: 全部标记已读
+      method: PUT
+      path: /api/notifications/read-all
+      auth: user
+      request_body: null
+      response: {data_type: null}
+      errors: [{code: 401, error_code: UNAUTHORIZED}]
+      implementation: "UPDATE ... SET is_read=1 WHERE user_id=? AND is_read=0"
+      idempotency: "无未读时影响 0 行，仍返回 200"
+      path_note: >-
+        ⚠️ 路径是 /read-all（字面量），与 /{id}/read 不冲突，
+        因为 {id} 位置的 "read-all" 无法转 Long。但断言时不要拼成 /readall 或 /read。
+
+# ═══════════════════════════════════════════════════════════════
+# 模块 8：举报（ReportController，前缀 /api/reports，1 个端点）
+# ═══════════════════════════════════════════════════════════════
+report:
+  controller: ReportController
+  class_prefix: /api/reports
+  source: backend/src/main/java/com/miqu/controller/ReportController.java
+  rule_domain_prefix: null
+  prefix_gap: >-
+    ⚠️ **本项目 ID 前缀体系的一个真实缺口**：check_consistency.py 的 VALID_PREFIXES
+    包含 14 个前缀（AUTH/USER/FOL/POST/LIKE/CMT/CONV/MSG/NOTI/SRCH/FILE/SEC/CONC/SMK），
+    其中 **SRCH 在 TEST_CASE_SCHEMA.md 中被定义为"搜索"**（对应 test_search.py），
+    但**没有任何前缀对应"举报"域**。举报相关规则目前散落在 SEC 前缀下或未登记。
+    → 见 issues.yaml C-05。新增举报规则时若要用新前缀（如 RPT），
+      必须同步扩展 check_consistency.py 的 VALID_PREFIXES，否则脚本会报"未知前缀"。
+
+  endpoints:
+    - "id: POST_REPORTS"
+      name: 提交举报
+      method: POST
+      path: /api/reports
+      auth: user
+      request_body:
+        dto: CreateReportRequest
+        fields:
+          - {name: targetType, type: Integer, required: true, min: 1, max: 3,
+             messages: {null: "举报目标类型不能为空", range: "举报目标类型只能是 1、2 或 3"},
+             mapping: "1=用户 2=动态 3=评论"}
+          - {name: targetId, type: Long, required: true, message_null: "举报目标不能为空"}
+          - {name: reasonType, type: Integer, required: true, min: 1, max: 5,
+             messages: {null: "举报原因不能为空", range: "举报原因取值不合法"},
+             mapping: "1=垃圾广告 2=辱骂骚扰 3=色情低俗 4=违法违规 5=其他"}
+          - {name: reasonDetail, type: String, required: false, max: 255,
+             message: "补充说明不能超过 255 个字符"}
+      response:
+        data_type: ReportVO
+        vo_fields: [id(String), targetType(Integer), targetId(String), createTime]
+        note: "响应**不回显** reasonType/reasonDetail/status，这些要查管理端才看得到"
+      errors:
+        - {code: 400, error_code: PARAM_INVALID, when: "字段校验失败（含 targetType=4）"}
+        - {code: 404, error_code: POST_NOT_FOUND, when: "targetType=2 但动态不存在"}
+        - {code: 404, error_code: COMMENT_NOT_FOUND, when: "targetType=3 但评论不存在"}
+        - {code: 404, error_code: USER_NOT_FOUND, when: "targetType=1 但用户不存在"}
+        - {code: 400, error_code: CANNOT_REPORT_SELF, when: "举报目标的作者是本人"}
+        - {code: 409, error_code: ALREADY_REPORTED, when: "已举报过同目标（uk_reporter_target 兜底）"}
+        - {code: 401, error_code: UNAUTHORIZED}
+        - {code: 423, error_code: USER_DISABLED}
+      error_check_order:
+        - "0. Bean Validation（含 targetType @Max(3)）→ 400 PARAM_INVALID"
+        - "1. requireActiveUser(userId) → 401/404/423"
+        - "2. !TargetTypeEnum.isValid(targetType) || ==REPORT → 400 INVALID_TARGET_TYPE"
+        - "3. resolveTargetOwner → 404 POST_NOT_FOUND/COMMENT_NOT_FOUND/USER_NOT_FOUND"
+        - "4. userId.equals(ownerId) → 400 CANNOT_REPORT_SELF"
+        - "5. exists(reporter+target) → 409 ALREADY_REPORTED"
+        - "6. insert（uk_reporter_target 兜底 → 409）"
+      unreachable_branch:
+        error_code: INVALID_TARGET_TYPE
+        reason: "步骤 2 对 targetType=4 不可达：DTO @Max(3) 在步骤 0 已拦为 PARAM_INVALID"
+        doc_conflict: "docs/api/reports.md 称传 4 返回 INVALID_TARGET_TYPE —— **错误**，见 issues.yaml C-03"
+      uniqueness_semantics: >-
+        唯一键是 (reporter_id, target_type, target_id)，即
+        **同一人对同一目标只能举报一次**，但**不同人可以举报同一目标**。
+        → 测 ALREADY_REPORTED 必须用同一个用户重复举报；换用户举报同一目标是 200。
+      side_effects:
+        - "插入 report 行，status=0(PENDING)"
+        - "**不产生通知、不自动处置**（处置需管理员调 PUT /api/admin/reports/{id}/handle）"
+      source_ref: [ReportServiceImpl.java:69-103]
+      related_rules: [RPT-001, RPT-002, RPT-003]
+      rule_id_note: >-
+        ⚠️ **前缀缺口**：举报域在 check_consistency.py 的 VALID_PREFIXES（14 个前缀）中
+        **没有对应前缀**——SRCH 已被 TEST_CASE_SCHEMA.md 定义为"搜索"域（对应 test_search.py）。
+        本知识库为举报规则提议使用 `RPT-` 前缀，但该前缀**尚未被校验脚本接受**。
+        若要把这些规则登记进 test_cases/，必须先扩展 VALID_PREFIXES 加入 RPT。
+        → 在此之前，RPT-* 仅存在于本知识库，不得写入 test_cases/。见 issues.yaml C-05。
+
+# ═══════════════════════════════════════════════════════════════
+# 模块 9：文件（FileController，前缀 /api/files，1 个端点）
+# ═══════════════════════════════════════════════════════════════
+file:
+  controller: FileController
+  class_prefix: /api/files
+  source: backend/src/main/java/com/miqu/controller/FileController.java
+  rule_domain_prefix: FILE
+  yaml_registered: true   # ✅ FILE-001~012 已在 security_and_concurrency.yaml 登记
+
+  endpoints:
+    - "id: POST_FILES_IMAGE"
+      name: 上传图片
+      method: POST
+      path: /api/files/image
+      auth: user
+      content_type: "multipart/form-data"
+      request_body:
+        form_field_name: file
+        field_type: MultipartFile
+        required: true
+        note: "字段名**固定为 file**，改名会当作缺字段"
+      response:
+        data_type: FileUploadVO
+        vo_fields: [{name: url, type: String, example: "/uploads/image/2026/09/<32位hex>.jpg"}]
+      errors:
+        - {code: 400, error_code: FILE_EMPTY, when: "文件为空"}
+        - {code: 400, error_code: FILE_TOO_LARGE, when: "超过 5MB"}
+        - {code: 400, error_code: FILE_TYPE_NOT_ALLOWED, when: "魔数不匹配 jpg/png/gif/webp，或文件 < 12 字节"}
+        - {code: 400, error_code: PARAM_INVALID, when: "请求非 multipart / 缺 file 字段"}
+        - {code: 401, error_code: UNAUTHORIZED}
+        - {code: 500, error_code: INTERNAL_ERROR, when: "路径穿越防护触发，message 覆盖为'非法的存储路径'"}
+      validation_rules:
+        magic_number_check:
+          fact: "按**文件头魔数**判断真实类型，不看扩展名"
+          consequence: "把 .exe 改名 .jpg 上传 → 400 FILE_TYPE_NOT_ALLOWED"
+          min_length: "文件 < 12 字节时魔数判定返回 null → 同样 400 FILE_TYPE_NOT_ALLOWED"
+          source: LocalFileStorageService.java:92-94
+        size_limit:
+          app_layer: "5MB（BizConstants.MAX_IMAGE_SIZE = 5*1024*1024）"
+          spring_multipart_max_file_size: 5MB
+          spring_multipart_max_request_size: 20MB
+          source: [BizConstants.java:54, application.yml:61-62]
+          note: "超过 Spring 的 max-file-size 会先抛 MaxUploadSizeExceededException，不一定走到业务码"
+        rename:
+          fact: "存储时用 UUID 重命名，文件名与原始名**无关**"
+          format: "<32位hex>.<原扩展名>"
+          source: LocalFileStorageService.java:63
+        path_traversal_protection:
+          fact: "解析后校验 targetDir 必须在 baseDir 之下，否则抛 INTERNAL_ERROR"
+          source: LocalFileStorageService.java:69-71
+          test_implication: "构造 ../../ 类相对路径应得到 500 + '非法的存储路径'，**不是** 200"
+      historical_bug: >-
+        曾出现"上传接口收到非 multipart / 缺 file 字段时返回 500 而非 4xx"，
+        已由 GlobalExceptionHandler 补映射修复（现返回 400）。见 MIQU_TEST_SYSTEM.md §8。
+      related_rules: [FILE-001, FILE-007, FILE-009, FILE-013, FILE-014, FILE-015]
+      existing_cases: [FILE-001, FILE-002, FILE-003, FILE-004, FILE-005, FILE-006, FILE-007,
+                       FILE-008, FILE-009, FILE-010, FILE-011, FILE-012]
+
+# ═══════════════════════════════════════════════════════════════
+# 模块 10：系统（HealthController，1 个端点）
+# ═══════════════════════════════════════════════════════════════
+system:
+  controller: HealthController
+  class_prefix: /api
+  source: backend/src/main/java/com/miqu/controller/HealthController.java
+
+  endpoints:
+    - "id: GET_HEALTH"
+      name: 健康检查
+      method: GET
+      path: /api/health
+      auth: anonymous
+      in_whitelist: true
+      response:
+        data_type: HealthVO
+        vo_fields:
+          - {name: status, type: String, values: [UP, DOWN]}
+          - {name: application, type: String, fixed_value: miqu}
+          - {name: database, type: String, values: [UP, DOWN]}
+      errors:
+        - {code: 500, error_code: INTERNAL_ERROR, when: "数据库不可用",
+           note: "此时 **data 仍有值**（Result.fail 三参重载），status/database = DOWN"}
+      real_db_probe: true
+      critical_fact: >-
+        健康接口**真实探测数据库**（执行查询），不是返回静态 UP。
+        这是为了防止 Hikari 懒初始化导致"健康检查 UP 但业务请求全 500"的历史问题。
+        见 HealthControllerTest 与 MIQU_TEST_SYSTEM.md §8。
+      pytest_usage: "conftest.py 的 ensure_backend_running 用此端点探活；不通则 pytest.exit 明确报错"
+
+# ═══════════════════════════════════════════════════════════════
+# 模块 11：管理后台（6 个 Controller，前缀 /api/admin，11 个端点）
+# ═══════════════════════════════════════════════════════════════
+admin:
+  controllers: [AdminUserController, AdminPostController, AdminCommentController,
+                AdminReportController, AdminStatsController, AdminLogController]
+  class_prefix: /api/admin
+  source: backend/src/main/java/com/miqu/controller/admin/
+  authorization: "**全部 6 个 Controller 类级标注 @RequireAdmin**"
+  not_in_whitelist: true
+  common_errors:
+    - {code: 401, error_code: UNAUTHORIZED, when: "未登录"}
+    - {code: 403, error_code: FORBIDDEN, when: "已登录但非管理员"}
+  batch_test_note: >-
+    11 个端点 × 2 种越权（未登录 401 / 普通用户 403）= 22 条高价值 parametrize 用例。
+    这是本项目**性价比最高**的批量生成场景，且预期码完全确定。
+
+  endpoints:
+    - "id: GET_ADMIN_STATS"
+      name: 统计概览
+      method: GET
+      path: /api/admin/stats
+      auth: admin
+      response:
+        data_type: AdminStatsVO
+        vo_fields: [userTotal, postTotal, commentTotal, todayNewUser, todayNewPost,
+                    todayNewComment, pendingReportTotal]
+        all_fields_type: "long（基本类型）→ JSON **数字**"
+      test_note: "pytest 断言必须用**差值**（before/after），不能用绝对值——纪律 2"
+
+    - "id: GET_ADMIN_USERS"
+      name: 用户列表
+      method: GET
+      path: /api/admin/users
+      auth: admin
+      query_params: {inherits: PageQuery, own: {keyword: {max: 32}, status: {min: 0, max: 1}}}
+      response:
+        data_type: "PageResult<AdminUserVO>"
+        item_fields: [id(String), username, nickname, email, avatar, role(Integer),
+                      status(Integer), followingCount, followerCount, postCount, createTime]
+        note: "管理端**返回 email**（与 UserProfileVO 不同）"
+
+    - "id: GET_ADMIN_USERS_ID"
+      name: 用户详情
+      method: GET
+      path: /api/admin/users/{id}
+      path_params: [{name: id, type: Long}]
+      auth: admin
+      response: {data_type: AdminUserVO}
+      errors: [{code: 404, error_code: USER_NOT_FOUND}]
+
+    - "id: PUT_ADMIN_USERS_ID_STATUS"
+      name: 禁用/解禁用户
+      method: PUT
+      path: /api/admin/users/{id}/status
+      path_params: [{name: id, type: Long}]
+      auth: admin
+      request_body:
+        dto: UpdateUserStatusRequest
+        fields:
+          - {name: status, type: Integer, required: true, min: 0, max: 1,
+             messages: {null: "状态不能为空", range: "状态只能是 0（禁用）或 1（正常）"},
+             mapping: "0=禁用 1=正常"}
+      response: {data_type: null}
+      errors:
+        - {code: 400, error_code: CANNOT_OPERATE_SELF, when: "id == 当前管理员 ID"}
+        - {code: 404, error_code: USER_NOT_FOUND, when: "目标不存在"}
+        - {code: 403, error_code: CANNOT_DISABLE_ADMIN, when: "目标是管理员"}
+        - {code: 401, error_code: UNAUTHORIZED}
+        - {code: 403, error_code: FORBIDDEN, when: "非管理员"}
+      error_check_order:
+        - "1. adminId.equals(targetUserId) → 400 CANNOT_OPERATE_SELF   ← **先**"
+        - "2. requireVisibleUser(targetUserId) → 404 USER_NOT_FOUND"
+        - "3. RoleEnum.isAdmin(target.role) → 403 CANNOT_DISABLE_ADMIN ← **后**"
+      unreachable_branch:
+        error_code: CANNOT_DISABLE_ADMIN
+        reason: >-
+          种子数据只有 **1 个管理员**（admin, id=1）。管理员禁用自己 → 步骤 1 先命中 400。
+          要触发步骤 3 需要"管理员 A 禁用管理员 B"，但种子没有第二个管理员。
+          → **HTTP 层无输入可触达**。这是 test_cases 登记的 SEC-004 缺口。
+        to_cover: "补第二个管理员种子账号，或写直接改库的集成测试"
+        issue_ref: issues.yaml M-01
+      side_effects:
+        - "更新 user.status"
+        - "写 admin_operation_log（operation_type = OP_DISABLE_USER / OP_ENABLE_USER）"
+        - "**被禁用用户的已签发 Token 立即失效**（每请求查库）→ 后续访问返回 423"
+      test_note: >-
+        ⚠️ 禁用 fresh_user 后必须在 finally 里**恢复 status=1**，
+        否则会给后续运行留下一个禁用账号（项目已有此惯例，见 test_auth.py:140-161）。
+      related_rules: [USER-012, USER-013, USER-014, SEC-002, SEC-004]
+      existing_cases: [SEC-002, "SEC-004(status: gap)"]
+
+    - "id: GET_ADMIN_POSTS"
+      name: 动态列表（管理端）
+      method: GET
+      path: /api/admin/posts
+      auth: admin
+      query_params: {inherits: PageQuery, own: {userId: Long, keyword: {max: 32}}}
+      response:
+        data_type: "PageResult<AdminPostVO>"
+        item_fields: [id(String), content, "images(List<String>)", "author(UserBriefVO)",
+                      likeCount, commentCount, createTime]
+
+    - "id: DELETE_ADMIN_POSTS_ID"
+      name: 管理员删除动态
+      method: DELETE
+      path: /api/admin/posts/{id}
+      path_params: [{name: id, type: Long}]
+      auth: admin
+      response: {data_type: null}
+      errors: [{code: 404, error_code: POST_NOT_FOUND}]
+      side_effects: ["同 DELETE_POSTS_ID 的级联（软删 post/comment、物理删 image/like、扣计数、清通知）",
+                     "写 admin_operation_log（DELETE_POST）"]
+
+    - "id: GET_ADMIN_COMMENTS"
+      name: 评论列表（管理端）
+      method: GET
+      path: /api/admin/comments
+      auth: admin
+      query_params: {inherits: PageQuery, own: {postId: Long, userId: Long, keyword: {max: 32}}}
+      response:
+        data_type: "PageResult<AdminCommentVO>"
+        item_fields: [id(String), postId(String), content, "author(UserBriefVO)", createTime]
+
+    - "id: DELETE_ADMIN_COMMENTS_ID"
+      name: 管理员删除评论
+      method: DELETE
+      path: /api/admin/comments/{id}
+      path_params: [{name: id, type: Long}]
+      auth: admin
+      response: {data_type: null}
+      errors: [{code: 404, error_code: COMMENT_NOT_FOUND}]
+      side_effects: ["逻辑删除 comment + decrCommentCount", "写 admin_operation_log（DELETE_COMMENT）"]
+
+    - "id: GET_ADMIN_REPORTS"
+      name: 举报列表（管理端）
+      method: GET
+      path: /api/admin/reports
+      auth: admin
+      query_params: {inherits: PageQuery, own: {status: {min: 0, max: 2, message: "处理状态只能是 0、1 或 2"}}}
+      response:
+        data_type: "PageResult<AdminReportVO>"
+        item_fields: [id(String), "reporter(UserBriefVO)", targetType(Integer), targetId(String),
+                      targetPreview(String), reasonType(Integer), reasonDetail(String),
+                      status(Integer), "handler(UserBriefVO|null)", handleRemark(String),
+                      handleTime(null|datetime), createTime]
+        note: "这是唯一能看到举报完整信息（含 reasonDetail、status、handler）的端点"
+
+    - "id: PUT_ADMIN_REPORTS_ID_HANDLE"
+      name: 处理举报
+      method: PUT
+      path: /api/admin/reports/{id}/handle
+      path_params: [{name: id, type: Long}]
+      auth: admin
+      request_body:
+        dto: HandleReportRequest
+        fields:
+          - {name: status, type: Integer, required: true, min: 1, max: 2,
+             messages: {null: "处理结论不能为空", range: "处理结论只能是 1（已处理）或 2（已驳回）"},
+             mapping: "1=已处理 2=已驳回"}
+          - {name: handleRemark, type: String, required: false, max: 255,
+             message: "处理备注不能超过 255 个字符"}
+          - {name: action, type: String, required: false, default: NONE,
+             enum: [NONE, DELETE_POST, DELETE_COMMENT, DISABLE_USER],
+             case_sensitivity: "大小写不敏感（ReportActionEnum.of）",
+             invalid_error: {code: 400, error_code: INVALID_REPORT_ACTION, message: "不支持的处置动作"}}
+      response: {data_type: null}
+      errors:
+        - {code: 400, error_code: NOT_FOUND, when: "举报不存在",
+           message_override: "举报不存在",
+           note: "⚠️ code=400 而非 404，且文案被覆盖（非 NOT_FOUND 默认的'资源不存在'）—— 见 issues.yaml C-04"}
+        - {code: 409, error_code: REPORT_ALREADY_HANDLED, when: "status != PENDING(0)"}
+        - {code: 400, error_code: REJECT_WITH_ACTION_NOT_ALLOWED, when: "status=2(驳回) 且 action != NONE"}
+        - {code: 400, error_code: REPORT_ACTION_MISMATCH, when: "action 与 targetType 不匹配"}
+        - {code: 400, error_code: INVALID_REPORT_ACTION, when: "action 字符串无法解析"}
+        - {code: 401, error_code: UNAUTHORIZED}
+        - {code: 403, error_code: FORBIDDEN}
+      error_check_order:
+        - "0. Bean Validation（status @Min(1)@Max(2)、handleRemark @Size）→ 400"
+        - "1. selectById == null → 400 + '举报不存在'"
+        - "2. !isPending(status) → 409 REPORT_ALREADY_HANDLED"
+        - "3. status==REJECTED && action!=NONE → 400 REJECT_WITH_ACTION_NOT_ALLOWED"
+        - "4. validateActionMatchesTarget → 400 REPORT_ACTION_MISMATCH"
+        - "5. applyAction（目标不存在时**吞掉**异常，其余重抛）"
+        - "6. updateById → 更新 status/handler_id/handle_time"
+      action_target_matching:
+        rule: "处置动作必须与举报目标类型匹配"
+        matrix:
+          - {action: NONE, allowed_target_types: [1, 2, 3]}
+          - {action: DELETE_POST, allowed_target_types: [2]}
+          - {action: DELETE_COMMENT, allowed_target_types: [3]}
+          - {action: DISABLE_USER, allowed_target_types: [1]}
+        source: ReportServiceImpl.java:225-235
+      side_effects:
+        - "更新 report.status / handler_id / handle_time"
+        - "applyAction 级联：DELETE_POST → 删动态（含其级联）；DELETE_COMMENT → 删评论；DISABLE_USER → user.status=0"
+        - "写 admin_operation_log（HANDLE_REPORT + 具体动作）"
+      state_machine_ref: states/state_machines.yaml → report_status
+      related_rules: [SRCH-004, SRCH-005, SRCH-006, SRCH-007, SRCH-008]
+
+    - "id: GET_ADMIN_LOGS"
+      name: 管理操作日志
+      method: GET
+      path: /api/admin/logs
+      auth: admin
+      query_params: {inherits: PageQuery, own: {adminId: Long, operationType: String}}
+      response:
+        data_type: "PageResult<AdminOperationLogVO>"
+        item_fields: [id(String), "admin(UserBriefVO)", operationType(String),
+                      targetType(Integer), targetId(String), detail(String), ip(String), createTime]
+        note: "targetType 此处可为 4(REPORT)，与举报的 1~3 不同（TargetTypeEnum 接受 1~4）"
+      test_note: "日志是**追加写**，无 update_time、无 deleted。每次管理操作后应能查到对应日志行。"
+
+# ═══════════════════════════════════════════════════════════════
+# 端点计数核对
+# ═══════════════════════════════════════════════════════════════
+endpoint_count_reconciliation:
+  auth: 3
+  user: 13
+  post: 7
+  comment: 3
+  conversation: 4
+  message: 2
+  notification: 4
+  report: 1
+  file: 1
+  system: 1
+  admin: 11
+  total: 50
+  matches_docs: "与 docs/testing/MIQU_TEST_SYSTEM.md §5「后端接口 50（16 个 Controller）」一致"
+  controller_count_check: "1(auth)+1(user)+1(post)+1(comment)+1(conv)+1(msg)+1(noti)+1(report)+1(file)+1(health)+6(admin) = 16 ✅"

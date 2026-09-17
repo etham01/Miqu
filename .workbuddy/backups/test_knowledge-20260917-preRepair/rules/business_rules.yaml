@@ -1,0 +1,1188 @@
+# Miqu 业务规则知识库
+#
+# 用途：**整个知识库最重要的部分**。AI 生成测试场景的主依据。
+#       让 AI 不再靠"社交应用的常识"猜这个项目该怎么测，而是按这里写明的真实规则测。
+# 消费者：
+#   LLM               → 生成测试场景与用例（given/when/then 直接映射为 setup/action/assert）
+#   Pydantic          → 校验 rule_id 引用是否存在
+#   BusinessValidator → 逐条比对预期 code 与 message
+#   CoverageValidator → 统计规则覆盖率（本文件是规则的权威清单）
+#
+# 真相来源：backend/src/main/java/com/miqu/service/impl/**（逐行读取）
+#           backend/src/main/java/com/miqu/common/ErrorCode.java
+#           test_cases/core_business_rules.yaml + security_and_concurrency.yaml（已有 100 条用例登记）
+#           docs/testing/bug_report.md（历史缺陷，说明哪些规则是踩坑后钉死的）
+#
+# confidence 分级：
+#   CONFIRMED = 源码/Schema/API/数据库/正式文档直接确认
+#   INFERRED  = 通过代码逻辑推断（**AI 使用前应先实测确认**）
+#   UNKNOWN   = 无法确认（**禁止当作事实断言**）
+#
+# ═══════════════════════════════════════════════════════════════
+# ID 纪律（必须遵守，否则会破坏项目已有体系）
+# ═══════════════════════════════════════════════════════════════
+#
+# 本项目已有一套 ID 体系，定义在 docs/testing/TEST_CASE_SCHEMA.md §3，
+# 校验在 test_cases/check_consistency.py 的 VALID_PREFIXES（14 个前缀）：
+#   AUTH USER FOL POST LIKE CMT CONV MSG NOTI SRCH FILE SEC CONC SMK
+#
+# 现有登记状况（2026-09-16 实测统计）：
+#   已登记（test_cases/*.yaml 共 100 条）：
+#     CONC 12 | CONV 13 | FILE 12 | FOL 6 | LIKE 4 | MSG 14 | SEC 12 | SMK 27
+#   **完全未登记（YAML 层为空，规则只活在 pytest/JUnit 代码里）**：
+#     AUTH | USER | POST | CMT | NOTI
+#
+# 本文件的策略：
+#   1. 已登记的 ID（CONV/MSG/FILE/SEC/CONC/FOL/LIKE）**只引用不复制**
+#      —— 内容以 test_cases/*.yaml 为准，本文件仅在 existing_cases 里指向它，
+#         避免制造第二份真相（这是 test_cases/README.md 的核心纪律）。
+#   2. 未登记的五个域（AUTH/USER/POST/CMT/NOTI）**在此首次结构化**，
+#      这是本知识库补齐的最大价值：让 AI 拿到这些域的可校验规则，而不是靠猜。
+#   3. 新增 ID 从各域现有最大序号 +1 开始，**不复用、不改含义**（同项目纪律）。
+#   4. 举报域无前缀，提议用 RPT-，但需先扩展 VALID_PREFIXES 才能落 test_cases/（见 issues.yaml C-05）。
+#
+# ⚠️ 本文件是**规则事实库**，不是用例登记库。用例的家在 test_cases/ 与 tests/。
+#    这里的 existing_cases 只是**指针**，用于双向追溯。
+
+meta:
+  generated_at: 2026-09-16
+  prefix_source: docs/testing/TEST_CASE_SCHEMA.md §3 + test_cases/check_consistency.py:34-37
+  total_rules_in_this_file: 78
+  already_registered_in_test_cases: 100
+  newly_structured_domains: [AUTH, USER, POST, CMT, NOTI]
+  http_status_policy: "HTTP 恒 200，下述 code 均指 body.code"
+
+# ═══════════════════════════════════════════════════════════════
+# AUTH 域 —— 认证（test_cases 中**未登记**，本文件首次结构化）
+# ═══════════════════════════════════════════════════════════════
+auth_rules:
+  domain: AUTH
+  registered_in_test_cases: false
+  gap_note: "test_cases/*.yaml 中无任何 AUTH- 条目；这些规则目前只由 tests/api/test_auth.py 与 AuthControllerTest.java 覆盖"
+
+  rules:
+    - "id: AUTH-001"
+      description: 注册时用户名已占用 → 409
+      given: {username_exists: true}
+      when: {action: "POST /api/auth/register，username 与已有用户相同"}
+      then:
+        success: false
+        code: 409
+        error_code: USERNAME_EXISTS
+        message: 用户名已被占用
+      preconditions: ["库中已有同名用户（可用种子 test001，或先注册一个）"]
+      related_api: POST_AUTH_REGISTER
+      related_entities: [user]
+      related_fields: [RegisterRequest.username]
+      evidence: {source: "AuthServiceImpl.java:47-49", confidence: CONFIRMED}
+      db_fallback: "并发注册同名时由 uk_username 兜底，同样映射为 409 USERNAME_EXISTS"
+
+    - "id: AUTH-002"
+      description: 注册时邮箱已注册 → 409
+      given: {email_exists: true}
+      when: {action: "POST /api/auth/register，email 与已有用户相同（username 不同）"}
+      then: {success: false, code: 409, error_code: EMAIL_EXISTS, message: 邮箱已被注册}
+      preconditions: ["库中已有同邮箱用户"]
+      related_api: POST_AUTH_REGISTER
+      related_entities: [user]
+      evidence: {source: "AuthServiceImpl.java:50-52", confidence: CONFIRMED}
+      test_note: "必须让 username 不同、只让 email 相同，否则先命中 AUTH-001"
+      db_fallback: "uk_email 兜底"
+
+    - "id: AUTH-003"
+      description: 登录凭证错误 → 401（用户名不存在与密码错误**故意不可区分**）
+      # ⚠️ 2026-09-17 修正：原写作 `{username_exists: false, or: password_wrong: true}`，
+      #    其中 `or` 作为**流式映射的键**会让 PyYAML 6.0.3 直接解析失败
+      #    （`and` / `not` 不会；而 `on` 会被静默解析成布尔 True —— 都是同一类坑）。
+      #    改成 any_of 列表后语义更明确，也不再依赖解析器的怪癖。
+      given:
+        any_of:
+          - {username_exists: false}
+          - {password_wrong: true}
+      when: {action: "POST /api/auth/login"}
+      then: {success: false, code: 401, error_code: INVALID_CREDENTIALS, message: 用户名或密码错误}
+      related_api: POST_AUTH_LOGIN
+      evidence: {source: "AuthServiceImpl.java:83-86", confidence: CONFIRMED}
+      security_design: >-
+        两种情况返回**完全相同**的 code 与 message，防止账号枚举。
+        → 不要生成"用户名不存在应返回 404 USER_NOT_FOUND"的用例，那是错的。
+      source_comment: "AuthServiceImpl.java:82 有注释说明此设计意图"
+
+    - "id: AUTH-004"
+      description: 登录被禁用账号 → 423
+      given: {user_status: 0, password_correct: true}
+      when: {action: "POST /api/auth/login"}
+      then: {success: false, code: 423, error_code: USER_DISABLED, message: "账号已被禁用，请联系管理员"}
+      preconditions: ["可用种子账号 banned001(id=12)，密码 123456"]
+      related_api: POST_AUTH_LOGIN
+      evidence: {source: "AuthServiceImpl.java:87-89", confidence: CONFIRMED}
+      note_423: "本项目用 **423**，不是 403。这是自定义语义。"
+
+    - "id: AUTH-005"
+      description: 登录校验顺序 —— 密码校验**先于**状态校验
+      given: {user_status: 0, password_correct: false}
+      when: {action: "POST /api/auth/login（被禁用账号 + 错误密码）"}
+      then: {success: false, code: 401, error_code: INVALID_CREDENTIALS, message: 用户名或密码错误}
+      not_expected: {code: 423, why: "状态校验在密码校验之后，走不到"}
+      related_api: POST_AUTH_LOGIN
+      evidence: {source: "AuthServiceImpl.java:83-86（先 matches 再 isNormal）", confidence: CONFIRMED}
+      why_it_matters: >-
+        这是"叠加违规"类规则：一个请求同时满足两个失败条件时，预期码取决于**代码顺序**。
+        AI 若按直觉认为"禁用账号就该 423"，会生成错误断言。
+      security_design: "不暴露'此账号存在且被禁用'这一信息"
+      cross_ref: rules/validation_order.yaml → LOGIN
+
+    - "id: AUTH-006"
+      description: 新注册用户的默认属性
+      given: {action_succeeds: true}
+      when: {action: "POST /api/auth/register 成功"}
+      then:
+        success: true
+        code: 200
+        data_assertions:
+          - {field: role, expected: 1, meaning: USER}
+          - {field: status, expected: 1, meaning: NORMAL}
+          - {field: followingCount, expected: 0}
+          - {field: followerCount, expected: 0}
+          - {field: postCount, expected: 0}
+          - {field: password, expected: "**不出现在响应中**"}
+          - {field: id, expected: "**字符串类型**（SER-01）"}
+      side_effects: ["仅插入 user 行；**不产生通知、不产生关注、不产生动态**"]
+      related_api: POST_AUTH_REGISTER
+      related_entities: [user]
+      evidence: {source: "AuthServiceImpl.java:63-67", confidence: CONFIRMED}
+
+    - "id: AUTH-007"
+      description: 退出登录**不会**使已签发的 Token 失效
+      given: {logged_in: true}
+      when: {action: "POST /api/auth/logout，然后用同一 Token 访问 GET /api/users/me"}
+      then:
+        logout_code: 200
+        subsequent_request_code: 200
+        note: "**旧 Token 在 7 天有效期内仍然可用**"
+      related_api: POST_AUTH_LOGOUT
+      evidence:
+        source: "AuthController.java:66-80（logout 只记 log.info，无任何服务端状态变更）"
+        confidence: CONFIRMED
+        corroborated_by: >-
+          AuthController 的 @Operation description 明确写着：
+          "本系统使用无状态 JWT，服务端不维护会话，因此退出登录由**客户端丢弃 Token** 完成。
+           该接口仅用于记录审计日志。已知限制：已签发的 Token 在有效期内仍然可用。
+           若需要服务端强制失效，需引入 Redis 黑名单或改用短期 access token + refresh token。"
+      why_it_matters: >-
+        ⚠️ **这是 AI 最容易猜错的规则之一**。绝大多数系统的 logout 会使会话失效，
+        AI 会本能地生成"登出后旧 Token 应返回 401"的用例 —— 在本项目这是**错误断言**（实际 200）。
+      the_only_ways_to_invalidate_token:
+        - "管理员禁用账号 → 423（每请求查库，立即生效）"
+        - "用户被逻辑删除 → 401（每请求查库，立即生效）"
+        - "等待 7 天自然过期"
+      related_rules: [SEC-002]
+
+    - "id: AUTH-008"
+      description: JWT 每请求查库，禁用后旧 Token 立即失效
+      given: {logged_in: true, then_disabled_by_admin: true}
+      when: {action: "用禁用前签发的 Token 访问任一受保护接口"}
+      then: {success: false, code: 423, error_code: USER_DISABLED}
+      related_api: "全部受保护端点"
+      evidence: {source: "JwtAuthenticationFilter.java:68-69", confidence: CONFIRMED}
+      why_it_matters: >-
+        如果只验签不查库，被禁用用户拿着旧 Token 在 7 天内都能继续访问。
+        这是 SEC-002 的实现基础。
+      test_cleanup: "用例必须在 finally 中把 status 恢复为 1，否则留下禁用账号"
+      existing_test: "tests/api/test_auth.py:140-161 test_me_returns_403_after_account_disabled"
+      naming_note: >-
+        ⚠️ 已有测试函数名是 `test_me_returns_403_after_account_disabled`，
+        但实际断言的是 **423**（函数名里的 403 是历史遗留的命名不准确）。
+        → 引用此用例时以**实际断言 423** 为准，不要被函数名误导。见 issues.yaml I-03。
+      related_rules: [SEC-002, AUTH-004]
+
+# ═══════════════════════════════════════════════════════════════
+# USER 域 —— 用户资料与账号（test_cases 中**未登记**）
+# ═══════════════════════════════════════════════════════════════
+user_rules:
+  domain: USER
+  registered_in_test_cases: false
+  gap_note: "test_cases/*.yaml 中无任何 USER- 条目"
+
+  rules:
+    - "id: USER-001"
+      description: 修改资料只允许白名单字段（批量赋值防护）
+      given: {logged_in: true}
+      when: {action: "PUT /api/users/me，请求体额外携带 username / email / role / status"}
+      then:
+        success: true
+        code: 200
+        assertions:
+          - "nickname / gender / birthday / bio 按请求修改"
+          - "username **未变**"
+          - "email **未变**"
+          - "role **未变**（仍为 1）"
+          - "status **未变**（仍为 1）"
+      related_api: PUT_USERS_ME
+      related_entities: [user]
+      evidence:
+        source: "UpdateProfileRequest 是 record 类型，只声明 nickname/gender/birthday/bio 四个字段"
+        confidence: CONFIRMED
+      mechanism: "Jackson 配置忽略未知字段（SER-06），多传的字段被静默丢弃，**不报错**"
+      assertion_warning: >-
+        ⚠️ 断言应是"字段未被修改"，**不是**"返回 400"。
+        AI 容易生成"多传 role 应被拒绝(400)"的错误用例。
+      existing_cases: [SEC-003]
+      priority: P0
+
+    - "id: USER-002"
+      description: 修改密码 —— 原密码不正确 → 400
+      given: {logged_in: true, old_password_wrong: true}
+      when: {action: "PUT /api/users/me/password"}
+      then: {success: false, code: 400, error_code: OLD_PASSWORD_MISMATCH, message: 原密码不正确}
+      related_api: PUT_USERS_ME_PASSWORD
+      evidence: {source: "UserServiceImpl.java:74-76", confidence: CONFIRMED}
+      test_data_warning: "**必须用 fresh_user**，种子账号密码改了无法恢复（无重置密码接口）"
+
+    - "id: USER-003"
+      description: 修改密码 —— 新密码与原密码相同 → 400
+      given: {logged_in: true, old_password_correct: true, new_equals_old: true}
+      when: {action: "PUT /api/users/me/password"}
+      then: {success: false, code: 400, error_code: PASSWORD_SAME_AS_OLD, message: 新密码不能与原密码相同}
+      related_api: PUT_USERS_ME_PASSWORD
+      evidence: {source: "UserServiceImpl.java:77-79", confidence: CONFIRMED}
+      check_order: "在 OLD_PASSWORD_MISMATCH 之后（原密码必须先对）"
+      side_effect_note: "**改密码不会使已签发 Token 失效**（JWT 无状态，同 AUTH-007）"
+
+    - "id: USER-004"
+      description: 头像 URL 必须以 /uploads/ 开头
+      given: {logged_in: true}
+      when: {action: "PUT /api/users/me/avatar，avatar 为外部链接"}
+      then: {success: false, code: 400, error_code: INVALID_IMAGE_URL,
+             message: "图片地址不合法，请先通过上传接口获取"}
+      related_api: PUT_USERS_ME_AVATAR
+      evidence: {source: "UserServiceImpl.java:101-104", confidence: CONFIRMED}
+      security_reason: >-
+        源码注释写明：否则用户可把头像指向任意外链（追踪像素、违规图），
+        服务器既成了别人的图床，内容审核也无从下手。
+      doc_conflict:
+        doc_claim: "docs/api/users.md:290-291,335 称**不校验前缀**，'不要写外链 400 的断言'"
+        code_reality: "**明确校验**，外链返回 400"
+        verdict: "**以代码为准**。文档是 BUG-005（2026-09-14 修复）之前的旧描述"
+        severity: P0
+        issue_ref: issues.yaml C-01
+      existing_cases: [SEC-011]
+      frozen: true
+      priority: P0
+
+    - "id: USER-005"
+      description: 头像前缀校验带尾部斜杠，近似串被拒
+      given: {logged_in: true}
+      when: {action: 'PUT /api/users/me/avatar，avatar = "/uploads-evil/x.png"'}
+      then: {success: false, code: 400, error_code: INVALID_IMAGE_URL}
+      related_api: PUT_USERS_ME_AVATAR
+      evidence:
+        source: "UserServiceImpl.java:100-101（prefix = urlPrefix + 「/」，源码注释明确提到此绕过手法）"
+        confidence: CONFIRMED
+      bypass_attempts_that_fail:
+        - "/uploads-evil/x.png"
+        - "/uploadsx/y.png"
+        - "uploads/z.png（缺前导斜杠）"
+      trimmed_before_check: "avatar 会先 trim()，故 '  /uploads/x.png  ' **能通过**"
+      related_rules: [USER-004, POST-003]
+
+    - "id: USER-006"
+      description: 搜索关键词的 LIKE 通配符被转义
+      given: {any_state: true}
+      when: {action: "GET /api/users/search?keyword=%"}
+      then:
+        success: true
+        code: 200
+        assertion: "**不会匹配全表**；% 被当作字面字符"
+      related_api: GET_USERS_SEARCH
+      evidence: {source: "UserServiceImpl.java:182 + common/SqlLikeUtils.java", confidence: CONFIRMED}
+      also_applies_to: ["keyword=_（单字符通配符）"]
+      existing_cases: [SEC-006]
+      frozen: true
+      priority: P0
+
+    - "id: USER-007"
+      description: 搜索关键词为空 → 400
+      given: {any_state: true}
+      when: {action: "GET /api/users/search?keyword=（空串）"}
+      then: {success: false, code: 400, error_code: PARAM_INVALID, message: 搜索关键词不能为空}
+      related_api: GET_USERS_SEARCH
+      evidence:
+        source: "UserSearchQuery @NotBlank + UserServiceImpl.java:176-178（Service 层二次校验，通常不可达）"
+        confidence: CONFIRMED
+      note: "DTO 校验先命中，Service 的同名分支不可达，但**文案字面相同**，断言安全"
+
+    - "id: USER-008"
+      description: requireActiveUser 闸门 —— userId 为 null → 401
+      given: {current_user_id: null}
+      when: {action: "调用任何使用 requireActiveUser 的受保护操作"}
+      then: {success: false, code: 401, error_code: UNAUTHORIZED}
+      evidence: {source: "UserServiceImpl.java:117-119", confidence: CONFIRMED}
+      note: "正常流程下 AuthInterceptor 已先拦，此分支是纵深防御"
+
+    - "id: USER-009"
+      description: requireActiveUser 闸门 —— 用户已逻辑删除 → 404
+      given: {user_deleted: true}
+      when: {action: "调用 requireActiveUser"}
+      then: {success: false, code: 404, error_code: USER_NOT_FOUND, message: 用户不存在}
+      evidence: {source: "UserServiceImpl.java:121-124", confidence: CONFIRMED}
+      mechanism: "@TableLogic 自动加 deleted=0，查不到即视为不存在"
+      test_data: "可用种子账号 deleted001(id=13)"
+
+    - "id: USER-010"
+      description: requireActiveUser 闸门 —— 用户被禁用 → 423
+      given: {user_status: 0}
+      when: {action: "调用 requireActiveUser"}
+      then: {success: false, code: 423, error_code: USER_DISABLED}
+      evidence: {source: "UserServiceImpl.java:125-127", confidence: CONFIRMED}
+      affects_apis: ["发帖", "评论", "点赞", "关注", "发私信", "开会话", "举报", "改资料", "改密码", "改头像", "上传"]
+      test_data: "可用种子账号 banned001(id=12)"
+
+    - "id: USER-011"
+      description: requireVisibleUser —— **禁用用户仍可被查看**
+      given: {user_status: 0}
+      when: {action: "GET /api/users/{id}（查看禁用用户主页）"}
+      then: {success: true, code: 200, note: "正常返回 UserProfileVO"}
+      related_api: GET_USERS_ID
+      evidence: {source: "UserServiceImpl.java:132-142（只查存在性，不检查 status）", confidence: CONFIRMED}
+      contrast_with: "requireActiveUser（USER-010）会拒绝禁用用户"
+      why_it_matters: >-
+        ⚠️ 反直觉：禁用用户**不能操作**但**能被看到**。
+        AI 容易生成"禁用用户主页应返回 423"的错误用例。
+      also_applies_to: ["GET /api/users/search（搜索结果**包含**禁用用户）", "管理端查看用户"]
+      excludes_deleted: "已逻辑删除的用户仍返回 404（@TableLogic 过滤）"
+
+    - "id: USER-012"
+      description: 管理员不能对自己执行禁用/解禁
+      given: {admin_id: X, target_user_id: X}
+      when: {action: "PUT /api/admin/users/{X}/status"}
+      then: {success: false, code: 400, error_code: CANNOT_OPERATE_SELF, message: 不能对自己执行该操作}
+      related_api: PUT_ADMIN_USERS_ID_STATUS
+      evidence: {source: "UserServiceImpl.java:217-219", confidence: CONFIRMED}
+
+    - "id: USER-013"
+      description: 管理员不能禁用另一个管理员
+      given: {admin_id: X, target_user_role: 2}
+      when: {action: "PUT /api/admin/users/{target}/status，body status=0"}
+      then: {success: false, code: 403, error_code: CANNOT_DISABLE_ADMIN, message: 不能禁用管理员账号}
+      related_api: PUT_ADMIN_USERS_ID_STATUS
+      evidence: {source: "UserServiceImpl.java:223-225", confidence: CONFIRMED}
+      unreachable_via_http: true
+      unreachable_reason: >-
+        种子数据**只有 1 个管理员**（admin, id=1）。
+        管理员禁用自己 → USER-012 的 400 先命中；
+        要触发本规则需要"管理员 A 禁用管理员 B"，但种子没有第二个管理员。
+        → **HTTP 层无输入可触达**。
+      existing_cases: ["SEC-004（status: gap）"]
+      gap_reason_from_test_cases: "校验顺序中'不能操作自己'先命中，种子只有一个管理员，HTTP 层无输入可触达"
+      to_cover: "补第二个管理员种子账号，或写直接改库的集成测试"
+      issue_ref: issues.yaml M-01
+      ai_instruction: >-
+        ⚠️ **不要生成这条规则的 HTTP 用例**——它无法通过 API 触达，生成的用例必然失败或假通过。
+        若要覆盖，只能建议"新增种子账号"或"写集成测试"，这属于**需人工决策的改动**。
+
+    - "id: USER-014"
+      description: 账号状态校验顺序 —— 不能操作自己(400) **先于** 目标是管理员(403)
+      given: {admin_id: X, target_user_id: X, target_user_role: 2}
+      when: {action: "PUT /api/admin/users/{X}/status（管理员禁用自己）"}
+      then: {success: false, code: 400, error_code: CANNOT_OPERATE_SELF}
+      not_expected: {code: 403, why: "CANNOT_DISABLE_ADMIN 的校验在后面，走不到"}
+      related_api: PUT_ADMIN_USERS_ID_STATUS
+      evidence: {source: "UserServiceImpl.java:217-225（先 equals 再 isAdmin）", confidence: CONFIRMED}
+      cross_ref: rules/validation_order.yaml → ADMIN_UPDATE_STATUS
+      consequence: "这条顺序依赖正是 USER-013 不可达的根因"
+
+# ═══════════════════════════════════════════════════════════════
+# POST 域 —— 动态（test_cases 中**未登记**）
+# ═══════════════════════════════════════════════════════════════
+post_rules:
+  domain: POST
+  registered_in_test_cases: false
+  gap_note: "test_cases/*.yaml 中无任何 POST- 条目（LIKE 域已登记 4 条）"
+
+  rules:
+    - "id: POST-001"
+      description: 动态内容与图片不能同时为空
+      given: {logged_in: true, content_empty: true, images_empty: true}
+      when: {action: "POST /api/posts"}
+      then: {success: false, code: 400, error_code: EMPTY_POST, message: 动态内容与图片不能同时为空}
+      related_api: POST_POSTS
+      related_fields: [PostCreateRequest.content, PostCreateRequest.images]
+      evidence: {source: "PostServiceImpl.java:70-72", confidence: CONFIRMED}
+      cross_field_rule: true
+      triggering_combinations:
+        - {content: null, images: null, expect: 400}
+        - {content: '""', images: '[]', expect: 400}
+        - {content: '""', images: null, expect: 400}
+        - {content: null, images: '[]', expect: 400}
+        - {content: '["   "]（纯空白）', images: '[]', expect: 400, confidence: INFERRED,
+           note: "Service 是否 trim 后判空未逐字确认，建议实测"}
+      non_triggering:
+        - {content: '"hi"', images: '[]', expect: 200}
+        - {content: '""', images: '["/uploads/a.jpg"]', expect: 200}
+      dto_note: >-
+        ⚠️ content **无 @NotBlank**（只有 @Size），所以空串/null 能通过 DTO 校验，
+        由 Service 的跨字段规则拦截。不要断言 message 为"动态内容不能为空"（无此文案）。
+
+    - "id: POST-002"
+      description: 单条动态最多 9 张图片
+      given: {logged_in: true, images_count: 10}
+      when: {action: "POST /api/posts"}
+      then: {success: false, code: 400, message: 最多只能上传 9 张图片}
+      related_api: POST_POSTS
+      evidence: {source: "PostCreateRequest @Size(max=9) + PostServiceImpl.java:73-75 + BizConstants.MAX_POST_IMAGES=9",
+                 confidence: CONFIRMED}
+      boundary: {max_ok: 9, min_fail: 10}
+      corroboration: "种子 post id=1 恰好 9 张图（data.sql 有意设计的上界样本）"
+      attribution_note: >-
+        ⚠️ DTO 的 @Size 会**先**拦为 PARAM_INVALID(400)，Service 的 TOO_MANY_IMAGES 分支通常不可达。
+        但两者 message **字面相同**，所以断言 code=400 + 该文案是安全的；
+        只是规则溯源应写 PARAM_INVALID / PostCreateRequest，不要声称触发了 TOO_MANY_IMAGES。
+      empty_string_elements_filtered: 'images 中的空串元素会被 trim 后过滤，故 ["a",""] 实际算 1 张'
+
+    - "id: POST-003"
+      description: 动态图片 URL 必须以 /uploads/ 开头
+      given: {logged_in: true}
+      when: {action: 'POST /api/posts，images 含 "https://evil.com/a.jpg"'}
+      then: {success: false, code: 400, error_code: INVALID_IMAGE_URL,
+             message: "图片地址不合法，请先通过上传接口获取"}
+      related_api: POST_POSTS
+      evidence: {source: "PostServiceImpl.java:318-325", confidence: CONFIRMED}
+      existing_cases: [SEC-007]
+      frozen: true
+      priority: P0
+      shares_error_code_with: USER-004（头像）
+      correct_workflow: "先 POST /api/files/image 拿到 url，再把该 url 放进 images"
+
+    - "id: POST-004"
+      description: 非作者且非管理员不能删除动态 → 403
+      given: {logged_in_as: B, post_author: A, b_is_admin: false}
+      when: {action: "DELETE /api/posts/{id}"}
+      then: {success: false, code: 403, error_code: FORBIDDEN, message: 无权限执行该操作}
+      related_api: DELETE_POSTS_ID
+      evidence: {source: "PostServiceImpl.java:106-109", confidence: CONFIRMED}
+      existing_cases: [SEC-009]
+      frozen: true
+      priority: P0
+      check_order: "先查 post 是否存在（404），再判权限（403）"
+      test_note: "用 fresh_user 建动态再让另一个 fresh_user 删，**不要删种子动态**"
+
+    - "id: POST-005"
+      description: 管理员可删除他人动态
+      given: {logged_in_as: admin, post_author: A}
+      when: {action: "DELETE /api/posts/{id}"}
+      then: {success: true, code: 200}
+      related_api: DELETE_POSTS_ID
+      evidence: {source: "PostServiceImpl.java:107（CurrentUserHolder.isAdmin()）", confidence: CONFIRMED}
+      side_effects_ref: rules/side_effects.yaml → DELETE_POST
+
+    - "id: POST-006"
+      description: tab=following 未登录 → 401（同端点的条件认证）
+      given: {logged_in: false}
+      when: {action: "GET /api/posts?tab=following"}
+      then: {success: false, code: 401, error_code: UNAUTHORIZED}
+      related_api: GET_POSTS
+      evidence: {source: "PostServiceImpl.java:135-137", confidence: CONFIRMED}
+      why_it_matters: >-
+        ⚠️ GET /api/posts **在免登录白名单里**，但 tab=following 时由 **Service 层**拦 401。
+        这是全项目唯一的"认证要求随查询参数变化"的端点。
+        AI 若只看白名单会漏掉这条用例。
+      contrast: {tab: latest, expect: "200（未登录可访问）"}
+
+    - "id: POST-007"
+      description: 删除动态的级联副作用
+      given: {post_has_comments: true, post_has_likes: true, post_has_images: true, post_has_notifications: true}
+      when: {action: "DELETE /api/posts/{id}（作者或管理员）"}
+      then:
+        success: true
+        code: 200
+        db_assertions:
+          - "post.deleted = 1（逻辑删除）"
+          - "该动态下全部 comment.deleted = 1（**逻辑删除**）"
+          - "post_image 行被**物理删除**"
+          - "post_like 行被**物理删除**"
+          - "user.post_count 减 1"
+          - "type=2(点赞)/type=3(评论) 且 post_id 匹配的 notification 被**物理删除**"
+      related_api: DELETE_POSTS_ID
+      evidence: {source: "PostServiceImpl.java:112-122", confidence: CONFIRMED}
+      cross_ref: rules/side_effects.yaml → DELETE_POST
+      soft_vs_physical_warning: >-
+        ⚠️ 同一操作里**混用**逻辑删除与物理删除。
+        直接 SQL 断言时：comment 要带 deleted=1 条件查；post_image/post_like/notification 是行已消失。
+
+# ═══════════════════════════════════════════════════════════════
+# LIKE 域 —— 点赞（test_cases 已登记 4 条，此处只引用不复制）
+# ═══════════════════════════════════════════════════════════════
+like_rules:
+  domain: LIKE
+  registered_in_test_cases: true
+  registered_ids: [LIKE-001, LIKE-002, LIKE-003, LIKE-004]
+  authoritative_source: "test_cases/core_business_rules.yaml"
+  do_not_duplicate: true
+  summary_only:
+    - {id: LIKE-001, gist: "重复点赞 → 409 ALREADY_LIKED（Service 先查 + uk_post_user 兜底）", frozen: true}
+    - {id: LIKE-002, gist: "取消点赞后可再次点赞（post_like **物理删除**，唯一键立即释放）", frozen: true}
+    - {id: LIKE-003, gist: "未点赞就取消 → 404 NOT_LIKED", frozen: true}
+    - {id: LIKE-004, gist: "like_count 与实际关系行数一致（返回值用 freshLikeCount 重新查库）", frozen: true}
+  ai_instruction: >-
+    生成点赞用例前，**先读 test_cases/core_business_rules.yaml 的 LIKE 段**取权威定义。
+    本文件只作索引，避免维护两份真相。
+  additional_related_rules: [NOTI-004（自己不通知自己）, CONC-002（并发重复点赞）]
+
+# ═══════════════════════════════════════════════════════════════
+# CMT 域 —— 评论（test_cases 中**未登记**）
+# ═══════════════════════════════════════════════════════════════
+comment_rules:
+  domain: CMT
+  registered_in_test_cases: false
+  gap_note: "test_cases/*.yaml 中无任何 CMT- 条目（仅 SEC-010 覆盖了「不能删他人评论」）"
+
+  rules:
+    - "id: CMT-001"
+      description: 评论内容不能为空
+      given: {logged_in: true}
+      when: {action: "POST /api/posts/{id}/comments，content 为空串或纯空白"}
+      then: {success: false, code: 400, message: 评论内容不能为空}
+      related_api: POST_POSTS_ID_COMMENTS
+      related_fields: [CommentCreateRequest.content]
+      evidence:
+        source: "CommentCreateRequest @NotBlank(message='评论内容不能为空') → PARAM_INVALID(400)"
+        confidence: CONFIRMED
+      dead_error_code_warning: >-
+        ⚠️ ErrorCode.EMPTY_COMMENT（文案同为"评论内容不能为空"）是**死枚举，全库无引用**。
+        实际触发路径是 DTO @NotBlank → PARAM_INVALID。
+        巧合的是**文案字面相同**，断言 message 会通过，
+        但规则溯源必须写 PARAM_INVALID / CommentCreateRequest，**不要**写 EMPTY_COMMENT。
+        见 issues.yaml C-02。
+      boundary: {max_ok: 500, min_fail: 501, max_message: "评论内容不能超过 500 个字符"}
+
+    - "id: CMT-002"
+      description: 非作者且非管理员不能删除评论 → 403
+      given: {logged_in_as: B, comment_author: A, b_is_admin: false}
+      when: {action: "DELETE /api/comments/{id}"}
+      then: {success: false, code: 403, error_code: FORBIDDEN, message: 无权限执行该操作}
+      related_api: DELETE_COMMENTS_ID
+      evidence: {source: "CommentServiceImpl.java:105-108", confidence: CONFIRMED}
+      existing_cases: [SEC-010]
+      frozen: true
+      priority: P0
+
+    - "id: CMT-003"
+      description: 管理员可删除他人评论
+      given: {logged_in_as: admin, comment_author: A}
+      when: {action: "DELETE /api/comments/{id}"}
+      then: {success: true, code: 200}
+      related_api: DELETE_COMMENTS_ID
+      evidence: {source: "CommentServiceImpl.java:106", confidence: CONFIRMED}
+      existing_cases: [CMT-003]
+      note: "SEC-010 的对照用例"
+
+    - "id: CMT-004"
+      description: 评论不存在 → 404
+      given: {comment_id: 不存在}
+      when: {action: "DELETE /api/comments/{id}"}
+      then: {success: false, code: 404, error_code: COMMENT_NOT_FOUND, message: 评论不存在或已被删除}
+      related_api: DELETE_COMMENTS_ID
+      evidence: {source: "CommentServiceImpl.java:101-103", confidence: CONFIRMED}
+      check_order: "404 先于 403（先查存在性，再判权限）"
+
+    - "id: CMT-005"
+      description: 删除评论的计数副作用（带条件）
+      given: {comment_exists: true}
+      when: {action: "DELETE /api/comments/{id}"}
+      then:
+        db_assertions:
+          - "comment.deleted = 1"
+          - "post.comment_count 减 1 —— **仅当 post 仍存在时**"
+      related_api: DELETE_COMMENTS_ID
+      evidence: {source: "CommentServiceImpl.java:110-117", confidence: CONFIRMED}
+      edge_case: "若动态已被删除，则不扣计数（避免对已删动态做无意义更新）"
+      confidence_note: "'仅当 post 仍存在'这一条件来自代码逻辑，属 CONFIRMED；具体分支行号见 evidence"
+
+    - "id: CMT-006"
+      description: CommentVO 无独立 userId 字段
+      given: {comment_created: true}
+      when: {action: "读取 POST /api/posts/{id}/comments 的响应"}
+      then:
+        assertion: "作者 ID 从 `data['author']['id']` 取（**字符串**），不存在 data['userId']"
+      related_api: [POST_POSTS_ID_COMMENTS, GET_POSTS_ID_COMMENTS]
+      evidence: {source: "vo/CommentVO.java 字段列表：id, postId, content, mine, author(UserBriefVO), createTime",
+                 confidence: CONFIRMED}
+      why_it_matters: >-
+        ⚠️ 这是**结构性事实**而非业务规则，但 AI 极易写成 data['userId'] 导致 KeyError。
+        放在规则库里是为了让 Validator 能拦下这种字段幻觉。
+
+    - "id: CMT-007"
+      description: 不支持回复评论 / 楼中楼（功能未实现）
+      given: {any_state: true}
+      when: {action: "尝试提交带 parentId 的评论"}
+      then: {expectation: "**parentId 会被静默忽略**（DTO 无此字段），产生一条普通顶层评论"}
+      related_api: POST_POSTS_ID_COMMENTS
+      evidence:
+        source: "comment 表有 parent_id / reply_to_user_id 列，但 CommentCreateRequest **不暴露**这两个字段"
+        confidence: CONFIRMED
+      forbidden_test: "**禁止生成回复评论、楼中楼、评论嵌套层级的测试用例**"
+      issue_ref: issues.yaml M-04
+
+# ═══════════════════════════════════════════════════════════════
+# NOTI 域 —— 通知（test_cases 中**未登记**，仅 SEC-008 覆盖越权）
+# ═══════════════════════════════════════════════════════════════
+notification_rules:
+  domain: NOTI
+  registered_in_test_cases: false
+  gap_note: "test_cases/*.yaml 中无任何 NOTI- 条目（SEC-008 覆盖了'不能操作他人通知'）"
+
+  rules:
+    - "id: NOTI-001"
+      description: 不能操作他人的通知 → 403
+      given: {logged_in_as: A, notification_owner: B}
+      when: {action: "PUT /api/notifications/{id}/read"}
+      then: {success: false, code: 403, error_code: FORBIDDEN, message: 无权限执行该操作}
+      related_api: PUT_NOTIFICATIONS_ID_READ
+      evidence: {source: "NotificationServiceImpl.java:151-153", confidence: CONFIRMED}
+      existing_cases: [SEC-008]
+      frozen: true
+      priority: P0
+
+    - "id: NOTI-002"
+      description: 通知不存在 → 404
+      given: {notification_id: 不存在}
+      when: {action: "PUT /api/notifications/{id}/read"}
+      then: {success: false, code: 404, error_code: NOTIFICATION_NOT_FOUND, message: 通知不存在}
+      related_api: PUT_NOTIFICATIONS_ID_READ
+      evidence: {source: "NotificationServiceImpl.java:146-148", confidence: CONFIRMED}
+      check_order: "404 先于 403"
+
+    - "id: NOTI-003"
+      description: 标记已读是幂等的
+      given: {notification_is_read: 1}
+      when: {action: "PUT /api/notifications/{id}/read（重复调用）"}
+      then:
+        success: true
+        code: 200
+        db_assertion: "**不执行 UPDATE**（直接 return）"
+      related_api: PUT_NOTIFICATIONS_ID_READ
+      evidence: {source: "NotificationServiceImpl.java:155-157", confidence: CONFIRMED}
+      test_note: "HTTP 层只能观察到 200；'不执行 UPDATE'需靠日志或 SQL 计数验证，属**弱可测**"
+
+    - "id: NOTI-004"
+      description: 自己对自己不产生通知
+      given: {actor_id: X, receiver_id: X}
+      when: {action: "点赞/评论自己的动态，或关注自己（关注自己已被 FOL-004 拦）"}
+      then:
+        assertion: "**不插入 notification 行**"
+      evidence: {source: "NotificationServiceImpl.java:190-192（receiverId.equals(actorId) 则直接 return）",
+                 confidence: CONFIRMED}
+      testable_cases:
+        - {action: "点赞自己的动态", expect: "200，且自己的通知列表**无新增**"}
+        - {action: "评论自己的动态", expect: "200，且自己的通知列表**无新增**"}
+        - {action: "关注自己", expect: "**400 CANNOT_FOLLOW_SELF**（走不到通知逻辑）"}
+      assertion_method: "用 unread-count 差值验证（before == after）"
+
+    - "id: NOTI-005"
+      description: 通知产生的三种触发源
+      given: {any_state: true}
+      when: {action: "关注 / 点赞 / 评论"}
+      then:
+        notification_created:
+          - {trigger: "A 关注 B", type: 1, type_name: FOLLOW, receiver: B, actor: A}
+          - {trigger: "A 点赞 B 的动态", type: 2, type_name: LIKE, receiver: B(作者), actor: A, post_id: 该动态}
+          - {trigger: "A 评论 B 的动态", type: 3, type_name: COMMENT, receiver: B(作者), actor: A,
+             post_id: "该动态, comment_id: 该评论}"
+      evidence: {source: "NotificationTypeEnum + FollowServiceImpl/PostServiceImpl/CommentServiceImpl 的 notify* 调用",
+                 confidence: CONFIRMED}
+      no_notification_for:
+        - "发帖（**不通知粉丝**）—— 易猜错点"
+        - "发私信（type=4 MESSAGE 是 @Deprecated 保留值，一期不用）"
+        - "举报"
+        - "改资料 / 改密码 / 改头像"
+        - "注册"
+      content_snapshot: "notification.content 存内容快照，截断至 50 字符（NOTIFICATION_SNAPSHOT_LENGTH）"
+
+    - "id: NOTI-006"
+      description: 取消动作会**物理删除**对应通知
+      given: {notification_exists: true}
+      when: {action: "取消关注 / 取消点赞 / 删除动态"}
+      then:
+        db_assertion: "对应 notification 行被**物理删除**（不是 deleted=1）"
+      evidence:
+        source: "FollowServiceImpl.removeFollowNotification、PostServiceImpl.removeLikeNotification / removePostNotifications"
+        confidence: CONFIRMED
+      why_it_matters: >-
+        ⚠️ notification 表**有** deleted 列（软删除），但这几处是**物理删除**。
+        直接 SQL 断言时行已消失，不是 deleted=1。混用两种删除方式是易错点。
+      observable_via_api: "取消后 GET /api/notifications 与 unread-count 都不再包含该条"
+
+    - "id: NOTI-007"
+      description: 通知查询只返回当前用户的通知
+      given: {logged_in_as: A}
+      when: {action: "GET /api/notifications"}
+      then: {assertion: "只返回 user_id = A 的通知；**无法查询他人通知**"}
+      related_api: GET_NOTIFICATIONS
+      evidence: {source: "NotificationServiceImpl 查询条件固定带 user_id = currentUserId", confidence: CONFIRMED}
+      no_filter_param: "**无 userId 查询参数**可越权查他人通知"
+
+    - "id: NOTI-008"
+      description: 通知无"标记未读"能力
+      given: {notification_is_read: 1}
+      when: {action: "尝试把已读通知改回未读"}
+      then: {expectation: "**无此 API**"}
+      evidence: {source: "NotificationController 只有 /{id}/read 与 /read-all，无 unread 端点", confidence: CONFIRMED}
+      forbidden_test: "**禁止生成'标记未读'的用例**"
+      state_machine_ref: states/state_machines.yaml → notification_is_read（单向 0→1）
+
+# ═══════════════════════════════════════════════════════════════
+# FOL 域 —— 关注（test_cases 已登记 6 条，此处引用 + 补充未登记的顺序规则）
+# ═══════════════════════════════════════════════════════════════
+follow_rules:
+  domain: FOL
+  registered_in_test_cases: true
+  registered_ids: [FOL-001, FOL-002, FOL-003, FOL-004, FOL-005, FOL-006]
+  authoritative_source: "test_cases/core_business_rules.yaml"
+  summary_only:
+    - {id: FOL-001, gist: "重复关注 → 409 ALREADY_FOLLOWED", frozen: true}
+    - {id: FOL-002, gist: "取消关注后可重新关注（follow 表**物理删除**）", frozen: true}
+    - {id: FOL-003, gist: "未关注就取消 → 404 NOT_FOLLOWED", frozen: true}
+    - {id: FOL-004, gist: "不能关注自己 → 400 CANNOT_FOLLOW_SELF", frozen: true}
+    - {id: FOL-005, gist: "不能关注被禁用用户 → 423", frozen: true}
+    - {id: FOL-006, gist: "关注不存在/已注销用户 → 404 USER_NOT_FOUND", frozen: true}
+
+  additional_rules_not_in_test_cases:
+    - "id: FOL-007"
+      description: 关注操作的完整校验顺序
+      given: {multiple_violations: true}
+      when: {action: "POST /api/users/{id}/follow"}
+      then:
+        order:
+          - "1. currentUserId == null → 401 UNAUTHORIZED"
+          - "2. currentUserId.equals(targetUserId) → 400 CANNOT_FOLLOW_SELF"
+          - "3. requireActiveUser(currentUserId) → 404/423"
+          - "4. requireActiveUser(targetUserId) → 404/423"
+          - "5. isFollowing(current,target) → 409 ALREADY_FOLLOWED"
+          - "6. insert（uk_follower_following 兜底 → 409 ALREADY_FOLLOWED）"
+      evidence: {source: "FollowServiceImpl.java:46-68", confidence: CONFIRMED}
+      cross_ref: rules/validation_order.yaml → FOLLOW
+      testable_overlap_cases:
+        - {case: "禁用用户关注自己", expect: "400 CANNOT_FOLLOW_SELF（步骤 2 先于步骤 3）", confidence: CONFIRMED}
+        - {case: "关注自己且已关注过（不可能）", expect: "N/A"}
+        - {case: "关注一个禁用用户，且已关注过", expect: "423（步骤 4 先于步骤 5）", confidence: CONFIRMED}
+
+    - "id: FOL-008"
+      description: 关注/取消关注对**互关状态**与**私信能力**的连带影响
+      given: {a_and_b_mutual: true}
+      when: {action: "A 取消关注 B"}
+      then:
+        immediate_effects:
+          - "互关状态被破坏"
+          - "A 向 B 发私信 → **403 NOT_MUTUAL_FOLLOW**"
+          - "B 向 A 发私信 → **403 NOT_MUTUAL_FOLLOW**"
+          - "A 打开与 B 的会话 → **403 NOT_MUTUAL_FOLLOW**"
+        preserved:
+          - "**已有会话不消失**（conversation 无 deleted 列）"
+          - "**历史消息仍可读**（GET /api/conversations/{id}/messages 只校验成员身份，不校验互关）"
+        after_re_follow:
+          - "A 重新关注 B 且 B 关注 A → 互关恢复 → **可继续发消息**"
+          - "会话仍是**同一个** id（uk_users 保证唯一）"
+      evidence:
+        source: "MessageServiceImpl.java:56 / ConversationServiceImpl.java:103（互关校验）；ConversationServiceImpl requireMember（读消息只校验成员）"
+        confidence: CONFIRMED
+      why_it_matters: >-
+        ⚠️ 这是本项目**最重要的冻结业务规则组合**，也是最反直觉的部分：
+        取消互关后"不能发新消息"但"能读历史"。
+        AI 容易猜成"取消互关后会话消失"或"历史也读不了"。
+      cross_ref: [workflows/workflows.yaml → WF-03, MSG-013, CONV-009]
+      priority: P0
+      frozen: true
+
+# ═══════════════════════════════════════════════════════════════
+# CONV / MSG 域 —— 会话与私信（test_cases 已登记 13+14 条，此处只引用）
+# ═══════════════════════════════════════════════════════════════
+conversation_message_rules:
+  domains: [CONV, MSG]
+  registered_in_test_cases: true
+  registered_ids:
+    CONV: [CONV-001, CONV-002, CONV-003, CONV-004, CONV-005, CONV-006, CONV-007,
+           CONV-008, CONV-009, CONV-010, CONV-011, CONV-012, CONV-013]
+    MSG: [MSG-001, MSG-002, MSG-003, MSG-004, MSG-005, MSG-006, MSG-007,
+          MSG-008, MSG-009, MSG-010, MSG-011, MSG-012, MSG-013, MSG-014]
+  authoritative_source: "test_cases/core_business_rules.yaml"
+  do_not_duplicate: true
+  frozen_headline_rule: "**私信要求双方互相关注**（NOT_MUTUAL_FOLLOW 403）—— 项目最高优先级冻结规则"
+
+  domain_boundary:
+    rule: >-
+      凡"能不能发/能不能读消息"归 **MSG**；
+      凡"能不能打开会话/是不是会话成员"归 **CONV**。
+    source: "docs/testing/TEST_CASE_SCHEMA.md §3"
+    reason: >-
+      此前 CONV-007/CONV-008 出现过"同一行为被两条 ID 各描述一遍"的冲突，
+      根因就是没定分界。这条分界是**有意写死**的。
+    ai_instruction: "生成新用例时按此分界选前缀，不要跨域重复登记同一行为"
+
+  critical_facts_ai_must_know:
+    - "id: MSGFACT-01"
+      fact: "非互关时：不能发消息(403)、不能打开会话(403)、不能创建会话(403)"
+      confidence: CONFIRMED
+    - "id: MSGFACT-02"
+      fact: "取消互关后：不能发**新**消息，但**历史消息仍可读**、会话仍存在"
+      confidence: CONFIRMED
+      related: [MSG-013, CONV-009]
+    - "id: MSGFACT-03"
+      fact: "读消息只校验**会话成员身份**（403 NOT_CONVERSATION_MEMBER），**不校验互关**"
+      confidence: CONFIRMED
+    - "id: MSGFACT-04"
+      fact: >-
+        "非互关 + 空内容" 返回 **400**（不是 403）—— DTO @NotBlank 在 Controller 层
+        先于 Service 的互关校验执行。
+      confidence: CONFIRMED
+      historical_correction: "曾误记为 403，2026-09-14 实测修正，TEST_COVERAGE_MATRIX.md 已更新"
+    - "id: MSGFACT-05"
+      fact: "同一对用户**只有一个会话**（uk_users + CHECK user1_id < user2_id），重复打开返回同一 id"
+      confidence: CONFIRMED
+    - "id: MSGFACT-06"
+      fact: "GET /api/conversations/{id}/messages 返回**裸数组**，不是 PageResult"
+      confidence: CONFIRMED
+    - "id: MSGFACT-07"
+      fact: "发私信**不产生通知**（type=4 MESSAGE 是 @Deprecated）"
+      confidence: CONFIRMED
+    - "id: MSGFACT-08"
+      fact: "未读数是 conversation 表上的**两个独立计数器**（user1_unread/user2_unread），发消息只增接收方"
+      confidence: CONFIRMED
+
+  additional_rules_not_in_test_cases:
+    - "id: MSG-015"
+      description: 消息 DTO 校验**先于** Service 互关校验
+      given: {not_mutual: true, content_blank: true}
+      when: {action: "POST /api/messages"}
+      then: {success: false, code: 400, message: 消息内容不能为空}
+      not_expected: {code: 403, why: "互关校验在 Service 层，晚于 Controller 的 @Valid"}
+      evidence: {source: "MessageSendRequest.java:24-25 + MessageServiceImpl.java:43-63", confidence: CONFIRMED}
+      cross_ref: rules/validation_order.yaml → MESSAGE_SEND
+      note: "此即 MSGFACT-04 的规则化表述"
+
+    - "id: MSG-016"
+      description: 消息内容长度上限 1000
+      given: {mutual: true, content_length: 1001}
+      when: {action: "POST /api/messages"}
+      then: {success: false, code: 400, message: 消息内容不能超过 1000 个字符}
+      evidence: {source: "MessageSendRequest.java:25 + BizConstants.MESSAGE_CONTENT_MAX=1000", confidence: CONFIRMED}
+      related_registered: MSG-014
+      boundary: {max_ok: 1000, min_fail: 1001}
+
+    - "id: MSG-017"
+      description: 发消息的完整校验顺序
+      given: {multiple_violations: true}
+      when: {action: "POST /api/messages"}
+      then:
+        order:
+          - "0. **Bean Validation（Controller 层，最先）** → 400 PARAM_INVALID"
+          - "1. requireActiveUser(senderId) → 401/404/423"
+          - "2. userId.equals(receiverId) → 400 CANNOT_MESSAGE_SELF"
+          - "3. requireActiveUser(receiverId) → 404/423"
+          - "4. !isMutual(userId,receiverId) → 403 NOT_MUTUAL_FOLLOW"
+          - "5. content.isEmpty() → 400（Service 层，通常不可达）"
+      evidence: {source: "MessageServiceImpl.java:43-63", confidence: CONFIRMED}
+      cross_ref: rules/validation_order.yaml → MESSAGE_SEND
+
+    - "id: CONV-014"
+      description: 打开会话的完整校验顺序
+      given: {multiple_violations: true}
+      when: {action: "POST /api/conversations"}
+      then:
+        order:
+          - "0. Bean Validation（targetUserId @NotNull）→ 400"
+          - "1. requireActiveUser(userId) → 401/404/423"
+          - "2. userId.equals(targetUserId) → 400 CANNOT_MESSAGE_SELF"
+          - "3. requireActiveUser(targetUserId) → 404/423"
+          - "4. !isMutual(userId,targetUserId) → 403 NOT_MUTUAL_FOLLOW"
+      evidence: {source: "ConversationServiceImpl.java:94-107", confidence: CONFIRMED}
+      note: "打开会话与发消息共用 CANNOT_MESSAGE_SELF 与 NOT_MUTUAL_FOLLOW"
+
+    - "id: CONV-015"
+      description: 并发首次创建会话应恰好成功一次
+      given: {no_conversation_yet: true, concurrent_requests: N}
+      when: {action: "N 个线程同时 POST /api/conversations（同一对用户）"}
+      then:
+        assertion: "**全部返回 200 且 conversation id 相同**（不是 1 个 200 + N-1 个 409）"
+      evidence:
+        source: "ConversationServiceImpl.java:49-55,172-195（TransactionTemplate PROPAGATION_REQUIRES_NEW）"
+        confidence: CONFIRMED
+      root_cause_of_historical_bug: >-
+        MySQL REPEATABLE READ 下，同一事务内普通 SELECT 看不到并发事务刚提交的会话行
+        → 重查仍为 null → 误报 409。SELECT...FOR UPDATE 会死锁。
+        解法是用 REQUIRES_NEW 开新事务重查（新事务有全新 read view）。
+      related_registered: CONC-005
+      uncovered_extent: "test_cases 登记的 CONC-007（数十线程同一瞬间首建会话）仍是 **gap**，本次只做到 8 线程"
+      issue_ref: issues.yaml M-02
+
+# ═══════════════════════════════════════════════════════════════
+# RPT 域 —— 举报（⚠️ 前缀未被 check_consistency.py 接受，见 issues.yaml C-05）
+# ═══════════════════════════════════════════════════════════════
+report_rules:
+  domain: RPT
+  prefix_status: >-
+    ⚠️ **提议中的新前缀**。check_consistency.py 的 VALID_PREFIXES（14 个）中
+    **没有举报域前缀**：SRCH 已被 TEST_CASE_SCHEMA.md 定义为"搜索"（对应 test_search.py）。
+    本域规则在 test_cases/*.yaml 中**未登记**（相关安全场景散落在 SEC- 下）。
+    → 若要把 RPT-* 写入 test_cases/，必须先扩展 VALID_PREFIXES 加入 RPT，
+      否则 check_consistency.py 会报"未知前缀"。见 issues.yaml C-05。
+  registered_in_test_cases: false
+
+  rules:
+    - "id: RPT-001"
+      description: 不能举报自己
+      given: {logged_in_as: A, target_owner: A}
+      when: {action: "POST /api/reports"}
+      then: {success: false, code: 400, error_code: CANNOT_REPORT_SELF, message: 不能举报自己}
+      related_api: POST_REPORTS
+      evidence: {source: "ReportServiceImpl.java:80-82", confidence: CONFIRMED}
+      note: "target_owner 由 resolveTargetOwner 解析：用户→本人；动态/评论→其作者"
+
+    - "id: RPT-002"
+      description: 同一人对同一目标不能重复举报
+      given: {already_reported: true}
+      when: {action: "POST /api/reports（同 reporter + 同 targetType + 同 targetId）"}
+      then: {success: false, code: 409, error_code: ALREADY_REPORTED, message: 你已经举报过该内容}
+      related_api: POST_REPORTS
+      evidence: {source: "ReportServiceImpl.java:85-90 + uk_reporter_target", confidence: CONFIRMED}
+      uniqueness_semantics: >-
+        唯一键是 (reporter_id, target_type, target_id)。
+        → **同一人**重复举报同一目标 = 409；**不同人**举报同一目标 = **200**（合法）。
+        AI 容易误以为"同一目标只能被举报一次"。
+      reason_type_irrelevant: "换 reasonType 重复举报同一目标**仍是 409**（唯一键不含 reason_type）"
+
+    - "id: RPT-003"
+      description: 举报目标不存在 → 404（按 targetType 分别返回对应文案）
+      given: {target_not_exists: true}
+      when: {action: "POST /api/reports"}
+      then:
+        by_target_type:
+          - {targetType: 1, code: 404, error_code: USER_NOT_FOUND, message: 用户不存在}
+          - {targetType: 2, code: 404, error_code: POST_NOT_FOUND, message: 动态不存在或已被删除}
+          - {targetType: 3, code: 404, error_code: COMMENT_NOT_FOUND, message: 评论不存在或已被删除}
+      related_api: POST_REPORTS
+      evidence: {source: "ReportServiceImpl.resolveTargetOwner", confidence: CONFIRMED}
+      check_order: "在 CANNOT_REPORT_SELF 之前（要先解析出 owner 才能比较）"
+
+    - "id: RPT-004"
+      description: targetType=4 的 Service 分支不可达
+      given: {targetType: 4}
+      when: {action: "POST /api/reports"}
+      then: {success: false, code: 400, error_code: PARAM_INVALID, message: 举报目标类型只能是 1、2 或 3}
+      not_expected: {error_code: INVALID_TARGET_TYPE, why: "DTO @Max(3) 先拦，Service 分支走不到"}
+      related_api: POST_REPORTS
+      evidence: {source: "CreateReportRequest @Max(3) + ReportServiceImpl.java:74-76", confidence: CONFIRMED}
+      doc_conflict:
+        doc_claim: "docs/api/reports.md 称传 4 返回 INVALID_TARGET_TYPE"
+        code_reality: "返回 PARAM_INVALID + '举报目标类型只能是 1、2 或 3'"
+        verdict: 以代码为准
+        issue_ref: issues.yaml C-03
+      note: "TargetTypeEnum.isValid() 接受 1~4（4=REPORT 供 admin_operation_log 用），但举报 DTO 只允许 1~3"
+
+    - "id: RPT-005"
+      description: 已处理的举报不能重复处理
+      given: {report_status: "1(HANDLED) 或 2(REJECTED)"}
+      when: {action: "PUT /api/admin/reports/{id}/handle"}
+      then: {success: false, code: 409, error_code: REPORT_ALREADY_HANDLED, message: 该举报已被处理}
+      related_api: PUT_ADMIN_REPORTS_ID_HANDLE
+      evidence: {source: "ReportServiceImpl.java:166-168", confidence: CONFIRMED}
+      seed_data_available: "data.sql 的 5 条举报中已有 status=1 与 status=2 的样本，可直接测"
+      state_machine_ref: states/state_machines.yaml → report_status
+
+    - "id: RPT-006"
+      description: 驳回举报时不能同时执行处置动作
+      given: {status: 2, action: "非 NONE"}
+      when: {action: "PUT /api/admin/reports/{id}/handle"}
+      then: {success: false, code: 400, error_code: REJECT_WITH_ACTION_NOT_ALLOWED,
+             message: 驳回举报时不能同时执行处置动作}
+      related_api: PUT_ADMIN_REPORTS_ID_HANDLE
+      evidence: {source: "ReportServiceImpl.java:174-177", confidence: CONFIRMED}
+      semantic_reason: "驳回意味着'举报不成立'，同时删帖/封号自相矛盾"
+
+    - "id: RPT-007"
+      description: 处置动作必须与举报目标类型匹配
+      given: {action_and_target_mismatch: true}
+      when: {action: "PUT /api/admin/reports/{id}/handle"}
+      then: {success: false, code: 400, error_code: REPORT_ACTION_MISMATCH,
+             message: 处置动作与举报目标类型不匹配}
+      related_api: PUT_ADMIN_REPORTS_ID_HANDLE
+      evidence: {source: "ReportServiceImpl.java:225-235", confidence: CONFIRMED}
+      matching_matrix:
+        - {action: NONE, allowed_target_types: [1, 2, 3]}
+        - {action: DELETE_POST, allowed_target_types: [2]}
+        - {action: DELETE_COMMENT, allowed_target_types: [3]}
+        - {action: DISABLE_USER, allowed_target_types: [1]}
+      mismatch_examples:
+        - {action: DELETE_POST, targetType: 3, expect: 400}
+        - {action: DISABLE_USER, targetType: 2, expect: 400}
+        - {action: DELETE_COMMENT, targetType: 1, expect: 400}
+
+    - "id: RPT-008"
+      description: 不支持的处置动作 → 400
+      given: {action: "非枚举值（如 BAN_USER）"}
+      when: {action: "PUT /api/admin/reports/{id}/handle"}
+      then: {success: false, code: 400, error_code: INVALID_REPORT_ACTION, message: 不支持的处置动作}
+      related_api: PUT_ADMIN_REPORTS_ID_HANDLE
+      evidence: {source: "ReportServiceImpl.java:216-222（ReportActionEnum.of 抛 IllegalArgumentException）",
+                 confidence: CONFIRMED}
+      case_insensitivity: "合法动作名**大小写不敏感**（delete_post 也接受）"
+
+    - "id: RPT-009"
+      description: 举报不存在 → 400（**不是 404**），且文案被覆盖
+      given: {report_id: 不存在}
+      when: {action: "PUT /api/admin/reports/{id}/handle"}
+      then: {success: false, code: 400, error_code: NOT_FOUND, message: 举报不存在}
+      related_api: PUT_ADMIN_REPORTS_ID_HANDLE
+      evidence: {source: 'ReportServiceImpl.java:162-164 BizException.of(ErrorCode.NOT_FOUND, "举报不存在")',
+                 confidence: CONFIRMED}
+      ⚠️_double_anomaly:
+        anomaly_1: "ErrorCode.NOT_FOUND 的 code 是 **404**，但此处实际返回 **400**"
+        anomaly_2: "文案被覆盖为'举报不存在'，而非 NOT_FOUND 默认的'资源不存在'"
+        confidence: INFERRED
+        inference_basis: >-
+          子代理报告称"实际抛出时使用覆盖文案，响应 message 是'举报不存在'"，
+          并标注 code=400。但 ErrorCode.NOT_FOUND 定义的是 404。
+          **两者矛盾，我无法从现有证据判定实际返回的 code 是 400 还是 404。**
+        ai_instruction: >-
+          ⚠️ **禁止直接断言此条的 code**。生成用例前必须先实测确认（写一条探测用例，
+          或读 BizException.of(errorCode, message) 的实现确认它是否改写 code）。
+          可先安全断言 message == "举报不存在"。
+        issue_ref: issues.yaml C-04
+
+    - "id: RPT-010"
+      description: 举报处置的级联副作用
+      given: {report_pending: true}
+      when: {action: "PUT /api/admin/reports/{id}/handle，status=1 + action=DELETE_POST/DELETE_COMMENT/DISABLE_USER"}
+      then:
+        db_assertions:
+          - "report.status = 1, handler_id = 当前管理员, handle_time 非空"
+          - "action=DELETE_POST → 该动态被逻辑删除（含 POST-007 的全部级联）"
+          - "action=DELETE_COMMENT → 该评论被逻辑删除 + post.comment_count 减 1"
+          - "action=DISABLE_USER → 目标 user.status = 0（其 Token 立即失效 → 423）"
+          - "写 admin_operation_log（HANDLE_REPORT + 具体动作）"
+      related_api: PUT_ADMIN_REPORTS_ID_HANDLE
+      evidence: {source: "ReportServiceImpl.java:180-194 applyAction", confidence: CONFIRMED}
+      exception_swallowing: >-
+        ⚠️ applyAction 中"目标不存在"的异常会被**吞掉**（举报仍标记为已处理），
+        其余异常重抛。这是有意设计（举报的目标可能已被删）。
+      cross_ref: rules/side_effects.yaml → HANDLE_REPORT
+
+# ═══════════════════════════════════════════════════════════════
+# FILE / SEC / CONC 域 —— 已在 test_cases 完整登记，此处只索引
+# ═══════════════════════════════════════════════════════════════
+registered_domains_index:
+  desc: >-
+    以下三个域的规则已在 test_cases/security_and_concurrency.yaml 中**完整登记**
+    （含 rule 原文与 frozen_at 冻结日期）。本知识库**不复制其内容**，只提供索引与
+    AI 使用时必须知道的补充事实。
+  authoritative_source: test_cases/security_and_concurrency.yaml
+
+  FILE:
+    registered_ids: [FILE-001, FILE-002, FILE-003, FILE-004, FILE-005, FILE-006,
+                     FILE-007, FILE-008, FILE-009, FILE-010, FILE-011, FILE-012]
+    additional_facts_not_in_test_cases:
+      - "id: FILE-013"
+        gist: "魔数检测要求文件长度 >= 12 字节，否则返回 null → 400 FILE_TYPE_NOT_ALLOWED"
+        evidence: {source: "LocalFileStorageService.java:92-94", confidence: CONFIRMED}
+        related_registered: FILE-007
+      - "id: FILE-014"
+        gist: "UUID 重命名，存储文件名与原始文件名**无关**（32 位 hex + 原扩展名）"
+        evidence: {source: "LocalFileStorageService.java:63", confidence: CONFIRMED}
+        related_registered: FILE-009
+      - "id: FILE-015"
+        gist: "路径穿越双保险：解析后校验 targetDir 必须在 baseDir 之下，否则抛 INTERNAL_ERROR + '非法的存储路径'"
+        evidence: {source: "LocalFileStorageService.java:69-71", confidence: CONFIRMED}
+        expected: {code: 500, message: 非法的存储路径}
+        note: "这是全项目少数会返回 500 的**预期**分支（不是缺陷）"
+
+  SEC:
+    registered_ids: [SEC-001, SEC-002, SEC-003, SEC-004, SEC-005, SEC-006,
+                     SEC-007, SEC-008, SEC-009, SEC-010, SEC-011, SEC-012]
+    known_gaps:
+      - {id: SEC-004, status: gap, reason: "不能禁用管理员账号 —— 校验顺序中'不能操作自己'先命中，种子只有一个管理员，HTTP 层无输入可触达",
+         cross_ref: USER-013}
+    status_change_history:
+      - {id: SEC-011, from: gap, to: implemented, date: 2026-09-14,
+         reason: "头像 URL 不校验 /uploads/ 前缀 —— Bug Hunt 修复，见 docs/testing/bug_report.md BUG-005",
+         cross_ref: USER-004}
+
+  CONC:
+    registered_ids: [CONC-001, CONC-002, CONC-003, CONC-004, CONC-005, CONC-006,
+                     CONC-007, CONC-008, CONC-009, CONC-010, CONC-011, CONC-012]
+    known_gaps:
+      - {id: CONC-007, status: gap, reason: "数十线程同一瞬间首建会话 —— 属压测范畴，本次只做到 8 线程",
+         cross_ref: CONV-015}
+    special_note: >-
+      CONC-008 ~ CONC-011 是**前端 UI 竞态**用例，用 `browser` 字段而非 `pytest` 字段
+      指向 tests/browser_regression.mjs 的断言 ID。这类缺陷"后端每次返回都是对的，
+      错在前端没把请求发出去"，pytest 打 HTTP 根本看不见。
+      见 execution/browser_contract.yaml。
+
+  SMK:
+    registered_ids: "SMK-001 ~ SMK-027（27 条）"
+    source_file: test_cases/api_smoke.yaml
+    purpose: "冒烟集合（pytest -m smoke，43 条），对外演示 / CI 首轮必须走通的主路径"
+    note: "SMK 条目是**分组**登记（12 组），与单个用例不是 1:1"
+
+# ═══════════════════════════════════════════════════════════════
+# 跨域规则（不属于单一域，但对测试设计至关重要）
+# ═══════════════════════════════════════════════════════════════
+cross_cutting_rules:
+  - "id: XC-001"
+    description: HTTP 状态码恒为 200，业务结果只看 body.code
+    scope: "全部 /api/** 端点"
+    then: {assertion_rule: "**永远不要断言 response.status_code**（恒 200，断言无意义或恒假）"}
+    sole_exception: "/uploads/** 静态资源缺失 → 真 HTTP 404"
+    evidence: {source: "GlobalExceptionHandler 全部 handler 返回 Result，无 @ResponseStatus", confidence: CONFIRMED}
+    priority: P0
+    ai_impact: "**最高频的 AI 错误来源**。必须在每条用例的断言中体现。"
+
+  - "id: XC-002"
+    description: 所有 id 类字段序列化为字符串，所有计数类字段序列化为数字
+    scope: 全部响应
+    then:
+      assertion_rule: 'data["id"] == "2"（字符串）；data["likeCount"] == 10（数字）'
+    evidence: {source: "config/JacksonConfig.java + docs/api/API_CONVENTIONS.md §7", confidence: CONFIRMED}
+    reason: "JS Number 精度只有 53 位，Long 直传会丢精度"
+    ai_impact: "类型写错会导致断言恒假（'2' != 2）"
+
+  - "id: XC-003"
+    description: 逻辑删除的数据对 API 不可见，但**仍在库里**
+    scope: "user / post / comment / message / notification"
+    then:
+      api_behavior: "查不到 → 返回对应的 *_NOT_FOUND(404)"
+      sql_assertion_rule: "直接查库必须显式带 `deleted = 0` 条件"
+    evidence: {source: "BaseEntity @TableLogic + application.yml:75-76", confidence: CONFIRMED}
+
+  - "id: XC-004"
+    description: 关系表是物理删除，取消后唯一键立即释放
+    scope: "follow / post_like / post_image"
+    then: {assertion_rule: "取消关注/点赞后可**立即**重新建立；直接查库时**行已消失**（不是 deleted=1）"}
+    evidence: {source: "BaseCreateEntity 无 @TableLogic；schema.sql 中这些表无 deleted 列", confidence: CONFIRMED}
+    related_rules: [FOL-002, LIKE-002]
+
+  - "id: XC-005"
+    description: 冗余计数与实际关系行数是两条独立断言
+    scope: "like_count / comment_count / image_count / following_count / follower_count / post_count"
+    then:
+      assertion_pattern: "操作后同时断言：① API 返回的计数值 ② 关系表实际行数（如可查）"
+    evidence: {source: "schema.sql 冗余列 + 各 ServiceImpl 的 incr/decr + freshXxxCount 重查", confidence: CONFIRMED}
+    historical_issue: "并发场景下曾出现计数与实际不一致，故 test_concurrency.py 专门断言此点"
+
+  - "id: XC-006"
+    description: 一个请求同时违反多条规则时，预期码由**代码校验顺序**决定
+    scope: 全部
+    then: {ai_instruction: "**生成叠加违规用例前必须先读 rules/validation_order.yaml**"}
+    known_cases: [AUTH-005, USER-014, FOL-007, MSG-015, MSG-017, CONV-014, RPT-004]
+    historical_error: "'非互关 + 空内容'曾误记为 403，实测为 400（2026-09-14 修正）"
+    priority: P0
+
+  - "id: XC-007"
+    description: pytest 断言用差值，不用绝对值（幂等纪律）
+    scope: "tests/ 下全部 pytest 用例"
+    then:
+      forbidden: 'assert admin_client.get("/api/admin/stats").data["userTotal"] == 21'
+      required: "before = ...; 操作; after = ...; assert after == before + 1"
+      sole_exception: "针对**种子数据样本**的绝对值断言（如 post id=1 有 9 张图）"
+    evidence: {source: "docs/testing/MIQU_TEST_SYSTEM.md §6 纪律 2 + §7 幂等性", confidence: CONFIRMED}
+    reason: "写入真实落库且**无删除用户接口**，库里数据随运行次数增长"

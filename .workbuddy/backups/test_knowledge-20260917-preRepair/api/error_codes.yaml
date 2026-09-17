@@ -1,0 +1,505 @@
+# Miqu 错误码全集
+#
+# 用途：AI 生成测试用例时，断言的 code 与 message **只能取自本文件**。
+# 消费者：LLM（写预期）、Business Validator（校验 code/message 是否真实存在）、执行器（生成断言）
+#
+# 真相来源：backend/src/main/java/com/miqu/common/ErrorCode.java（逐字抄录，含枚举名与文案）
+#           backend/src/main/java/com/miqu/exception/GlobalExceptionHandler.java（框架层码与唯一键映射）
+# confidence: CONFIRMED（全部条目均来自源码）
+#
+# ⚠️ 断言纪律（见 assertion_discipline）：
+#    message 是否能精确断言，取决于该 code 是否只对应一条文案。
+
+meta:
+  source: backend/src/main/java/com/miqu/common/ErrorCode.java
+  http_status_policy: "业务接口 /api/** 的 HTTP 状态码恒为 200，业务结果只看 body.code"
+  http_status_exception: "/uploads/** 静态资源缺失时返回真正的 HTTP 404（全项目唯一例外）"
+  note_423: "423 是本项目自定义的账号禁用码，非标准 HTTP 语义，断言时不要写成 403"
+
+# ─────────────────────────────────────────────
+# 一、ErrorCode 枚举全集（42 条）
+# ─────────────────────────────────────────────
+# message_assertable 含义：
+#   true  = 该 code 在本项目中只对应这一条文案，可精确断言 message
+#   false = 该 code 被多处复用且文案不同，或文案由运行时拼接，**只能断言 code**
+error_codes:
+  # ---------- 通用 ----------
+  - "name: SUCCESS"
+    code: 200
+    message: success
+    message_assertable: true
+    category: general
+
+  - "name: PARAM_INVALID"
+    code: 400
+    message: 参数校验失败
+    message_assertable: false
+    category: general
+    note: >-
+      实际响应中 message 几乎**从不**是"参数校验失败"。
+      GlobalExceptionHandler 的三个校验 handler 都用 findFirst() 取出**具体字段**的
+      自定义文案替换掉它（见 framework_handlers 与 validation_message_rule）。
+      仅当 BindingResult 无任何 FieldError 时才回落到本文案。
+      → 断言参数校验失败时：code 断 400，message 断"具体字段文案"，不要断"参数校验失败"。
+
+  - "name: UNAUTHORIZED"
+    code: 401
+    message: 未登录或登录状态已失效
+    message_assertable: true
+    category: general
+
+  - "name: FORBIDDEN"
+    code: 403
+    message: 无权限执行该操作
+    message_assertable: false
+    category: general
+    note: >-
+      被复用为多种越权语义（删他人动态/评论、操作他人通知、非 admin 访问管理端）。
+      code 可精确断言，message 通常也是这条，但存在被 BizException.of(code, 自定义文案)
+      覆盖的场景，故标记为不可依赖。
+
+  - "name: NOT_FOUND"
+    code: 404
+    message: 资源不存在
+    message_assertable: false
+    category: general
+    note: >-
+      ReportServiceImpl.handle 中抛此码时**覆盖了文案**为"举报不存在"
+      （BizException.of(ErrorCode.NOT_FOUND, "举报不存在")）。
+      这是本项目唯一确认的 NOT_FOUND 文案覆盖点，见 issues.yaml C-04。
+
+  - "name: CONFLICT"
+    code: 409
+    message: 资源冲突
+    message_assertable: true
+    category: general
+    note: 未识别的唯一键冲突、以及 uk_users（会话）冲突时返回此码。
+
+  - "name: INTERNAL_ERROR"
+    code: 500
+    message: 系统异常，请稍后重试
+    message_assertable: false
+    category: general
+    note: LocalFileStorageService 路径穿越防护抛出时覆盖文案为"非法的存储路径"。
+
+  # ---------- 认证 / 用户 ----------
+  - "name: INVALID_CREDENTIALS"
+    code: 401
+    message: 用户名或密码错误
+    message_assertable: true
+    category: auth
+    note: 用户名不存在与密码错误**故意合并**为同一条，防账号枚举（AuthServiceImpl.java:82 注释）。
+
+  - "name: USER_DISABLED"
+    code: 423
+    message: 账号已被禁用，请联系管理员
+    message_assertable: true
+    category: auth
+    note: 登录时、以及携带旧 Token 访问受保护接口时（JwtAuthenticationFilter 每请求查库）均会返回。
+
+  - "name: USER_NOT_FOUND"
+    code: 404
+    message: 用户不存在
+    message_assertable: true
+    category: user
+
+  - "name: USERNAME_EXISTS"
+    code: 409
+    message: 用户名已被占用
+    message_assertable: true
+    category: user
+
+  - "name: EMAIL_EXISTS"
+    code: 409
+    message: 邮箱已被注册
+    message_assertable: true
+    category: user
+
+  - "name: OLD_PASSWORD_MISMATCH"
+    code: 400
+    message: 原密码不正确
+    message_assertable: true
+    category: user
+
+  - "name: PASSWORD_SAME_AS_OLD"
+    code: 400
+    message: 新密码不能与原密码相同
+    message_assertable: true
+    category: user
+
+  - "name: CANNOT_OPERATE_SELF"
+    code: 400
+    message: 不能对自己执行该操作
+    message_assertable: true
+    category: user
+
+  # ---------- 关注 ----------
+  - "name: CANNOT_FOLLOW_SELF"
+    code: 400
+    message: 不能关注自己
+    message_assertable: true
+    category: follow
+
+  - "name: ALREADY_FOLLOWED"
+    code: 409
+    message: 已经关注过该用户
+    message_assertable: true
+    category: follow
+
+  - "name: NOT_FOLLOWED"
+    code: 404
+    message: 尚未关注该用户
+    message_assertable: true
+    category: follow
+
+  # ---------- 动态 ----------
+  - "name: POST_NOT_FOUND"
+    code: 404
+    message: 动态不存在或已被删除
+    message_assertable: true
+    category: post
+
+  - "name: EMPTY_POST"
+    code: 400
+    message: 动态内容与图片不能同时为空
+    message_assertable: true
+    category: post
+
+  - "name: TOO_MANY_IMAGES"
+    code: 400
+    message: 最多只能上传 9 张图片
+    message_assertable: true
+    category: post
+    note: 与 PostCreateRequest.images 上 @Size(max=9) 的文案**字面相同**，但触发路径不同（DTO 先拦）。
+
+  - "name: INVALID_IMAGE_URL"
+    code: 400
+    message: 图片地址不合法，请先通过上传接口获取
+    message_assertable: true
+    category: post
+    note: 发帖图片与用户头像**共用**此码（PostServiceImpl.java:318-325、UserServiceImpl.java:101-104）。
+
+  - "name: ALREADY_LIKED"
+    code: 409
+    message: 已经点赞过该动态
+    message_assertable: true
+    category: like
+
+  - "name: NOT_LIKED"
+    code: 404
+    message: 尚未点赞该动态
+    message_assertable: true
+    category: like
+
+  # ---------- 评论 ----------
+  - "name: COMMENT_NOT_FOUND"
+    code: 404
+    message: 评论不存在或已被删除
+    message_assertable: true
+    category: comment
+
+  - "name: EMPTY_COMMENT"
+    code: 400
+    message: 评论内容不能为空
+    message_assertable: false
+    category: comment
+    dead_code: true
+    note: >-
+      ⚠️ **死枚举**：全库无任何引用。CommentCreateRequest.content 的
+      @NotBlank(message="评论内容不能为空") 会先返回 PARAM_INVALID(400)。
+      巧合的是文案**字面相同**，所以断言 message 会通过，但断言"由 EMPTY_COMMENT 产生"是错的。
+      → AI 生成用例时应写 code=400 + message="评论内容不能为空"，
+        并把来源归为 DTO 校验（PARAM_INVALID），不要归为 EMPTY_COMMENT。见 issues.yaml C-02。
+
+  # ---------- 私信 ----------
+  - "name: CONVERSATION_NOT_FOUND"
+    code: 404
+    message: 会话不存在
+    message_assertable: true
+    category: conversation
+
+  - "name: NOT_CONVERSATION_MEMBER"
+    code: 403
+    message: 你不是该会话的参与者
+    message_assertable: true
+    category: conversation
+
+  - "name: CANNOT_MESSAGE_SELF"
+    code: 400
+    message: 不能给自己发送私信
+    message_assertable: true
+    category: message
+    note: 发消息与打开会话**共用**此码。
+
+  - "name: NOT_MUTUAL_FOLLOW"
+    code: 403
+    message: 需要互相关注后才能私聊
+    message_assertable: true
+    category: message
+    frozen_rule: true
+    note: >-
+      项目**冻结业务规则**的核心错误码。非互关时：不能发消息、也不能打开/创建会话。
+      历史纠偏：曾误记为"非互关+空内容=403"，2026-09-14 实测为 **400**
+      （DTO @NotBlank 先于 Service 互关校验），已修正。见 rules/validation_order.yaml MSG 段。
+
+  # ---------- 通知 ----------
+  - "name: NOTIFICATION_NOT_FOUND"
+    code: 404
+    message: 通知不存在
+    message_assertable: true
+    category: notification
+
+  # ---------- 举报 ----------
+  - "name: ALREADY_REPORTED"
+    code: 409
+    message: 你已经举报过该内容
+    message_assertable: true
+    category: report
+
+  - "name: CANNOT_REPORT_SELF"
+    code: 400
+    message: 不能举报自己
+    message_assertable: true
+    category: report
+
+  - "name: INVALID_TARGET_TYPE"
+    code: 400
+    message: 举报目标类型不合法
+    message_assertable: false
+    category: report
+    unreachable_via_http: "targetType=4"
+    note: >-
+      CreateReportRequest.targetType 有 @Max(3)，传 4 会被 Bean Validation 先拦为
+      PARAM_INVALID(400) + "举报目标类型只能是 1、2 或 3"，Service 的此分支对 4 **不可达**。
+      文档 docs/api/reports.md 的说法是错的，见 issues.yaml C-03。
+
+  - "name: REPORT_ALREADY_HANDLED"
+    code: 409
+    message: 该举报已被处理
+    message_assertable: true
+    category: report
+
+  - "name: REPORT_ACTION_MISMATCH"
+    code: 400
+    message: 处置动作与举报目标类型不匹配
+    message_assertable: true
+    category: report
+
+  - "name: REJECT_WITH_ACTION_NOT_ALLOWED"
+    code: 400
+    message: 驳回举报时不能同时执行处置动作
+    message_assertable: true
+    category: report
+
+  # ---------- 管理后台 ----------
+  - "name: CANNOT_DISABLE_ADMIN"
+    code: 403
+    message: 不能禁用管理员账号
+    message_assertable: true
+    category: admin
+    unreachable_via_http: true
+    note: >-
+      种子数据只有 1 个管理员，且"不能操作自己"(400) 先于此校验命中，
+      故 HTTP 层**无输入可触达**。这是 test_cases 登记的 SEC-004 缺口。
+      要覆盖需补第二个管理员账号或写直接改库的集成测试。见 issues.yaml M-01。
+
+  - "name: INVALID_REPORT_ACTION"
+    code: 400
+    message: 不支持的处置动作
+    message_assertable: true
+    category: admin
+
+  # ---------- 文件 ----------
+  - "name: FILE_EMPTY"
+    code: 400
+    message: 上传文件不能为空
+    message_assertable: true
+    category: file
+
+  - "name: FILE_TOO_LARGE"
+    code: 400
+    message: 图片大小不能超过 5MB
+    message_assertable: true
+    category: file
+
+  - "name: FILE_TYPE_NOT_ALLOWED"
+    code: 400
+    message: 仅支持 jpg / png / gif / webp 格式的图片
+    message_assertable: true
+    category: file
+    note: 按**文件头魔数**判断真实类型，改扩展名无效；文件 < 12 字节时也返回此码。
+
+# ─────────────────────────────────────────────
+# 二、框架层产生的码（非 ErrorCode 枚举，但真实出现在响应中）
+# ─────────────────────────────────────────────
+# 来源：GlobalExceptionHandler.java
+framework_handlers:
+  - "trigger: MethodArgumentNotValidException"
+    when: "@RequestBody 上的 @Valid 校验失败"
+    code: 400
+    message_rule: "取 BindingResult.getFieldErrors() 的**第一个** FieldError 的 defaultMessage"
+    fallback_message: 参数校验失败
+
+  - "trigger: BindException"
+    when: "表单/查询参数绑定校验失败"
+    code: 400
+    message_rule: "同上，取第一个 FieldError 的 defaultMessage"
+    fallback_message: 参数校验失败
+
+  - "trigger: ConstraintViolationException"
+    when: "方法参数上的 @Validated（如 @RequestParam 约束）失败"
+    code: 400
+    message_rule: "取第一个 ConstraintViolation 的 message"
+    fallback_message: 参数校验失败
+
+  - "trigger: MissingServletRequestParameterException"
+    when: "缺少必需的 @RequestParam"
+    code: 400
+    message_template: "缺少必要参数：{参数名}"
+    message_assertable: true
+    note: 参数名运行时拼接，可断言但需知道确切参数名。
+
+  - "trigger: MethodArgumentTypeMismatchException"
+    when: "路径/查询参数类型不匹配（如 id 传字母）"
+    code: 400
+    message_template: "参数格式不正确：{参数名}"
+    message_assertable: true
+    note: >-
+      ⚠️ 但形如 /api/posts/{id:[0-9]+} 的路径带**正则约束**，传非数字会先变成
+      路径不匹配 → NoResourceFoundException(404)，**到不了**这个 handler。
+      见 path_param_regex 段。
+
+  - "trigger: HttpMessageNotReadableException"
+    when: "请求体不是合法 JSON，或字段类型不匹配"
+    code: 400
+    message: 请求体格式不正确
+    message_assertable: true
+
+  - "trigger: NoResourceFoundException"
+    when: "路径未匹配任何 handler"
+    code: 404
+    message: 请求的资源不存在
+    message_assertable: true
+    note: 文案与 ErrorCode.NOT_FOUND 的"资源不存在"**不同**，注意区分。
+
+  - "trigger: HttpRequestMethodNotSupportedException"
+    when: "路径存在但 HTTP 方法不对"
+    code: 405
+    message_template: "请求方法不支持：{METHOD}"
+    message_assertable: true
+    note: 这是全项目**唯一**会出现 405 业务码的地方（ErrorCode 枚举中无 405）。
+
+  - "trigger: DuplicateKeyException"
+    when: "数据库唯一键冲突（并发兜底的关键路径）"
+    code_rule: "按**索引名**翻译，见 duplicate_key_mapping"
+    note: >-
+      这是并发场景防重复的**唯一正确兜底**：Service 层"先查再插"只是快速失败，
+      真正拦住重复数据的是数据库唯一键。若不翻译会变成 500，
+      导致"重复关注应返回 409"这类断言失败。索引名改了就必须在 handler 里同步。
+
+# ─────────────────────────────────────────────
+# 三、唯一键冲突 → 业务码映射
+# ─────────────────────────────────────────────
+# 来源：GlobalExceptionHandler.handleDuplicateKey + resolveConstraint
+# 索引名与 database/schema.sql 一一对应
+duplicate_key_mapping:
+  - "index: uk_username"
+    table: user
+    columns: [username]
+    maps_to: USERNAME_EXISTS
+    code: 409
+
+  - "index: uk_email"
+    table: user
+    columns: [email]
+    maps_to: EMAIL_EXISTS
+    code: 409
+
+  - "index: uk_follower_following"
+    table: follow
+    columns: [follower_id, following_id]
+    maps_to: ALREADY_FOLLOWED
+    code: 409
+
+  - "index: uk_post_user"
+    table: post_like
+    columns: [post_id, user_id]
+    maps_to: ALREADY_LIKED
+    code: 409
+
+  - "index: uk_users"
+    table: conversation
+    columns: [user1_id, user2_id]
+    maps_to: CONFLICT
+    code: 409
+    note: 通用 CONFLICT，**不是**专门文案。正常情况下 ConversationServiceImpl 的 REQUIRES_NEW 重查会避免走到这里。
+
+  - "index: uk_reporter_target"
+    table: report
+    columns: [reporter_id, target_type, target_id]
+    maps_to: ALREADY_REPORTED
+    code: 409
+
+  - "index: uk_post_sort"
+    table: post_image
+    columns: [post_id, sort_order]
+    maps_to: CONFLICT
+    code: 409
+    note: >-
+      ⚠️ schema.sql 中存在此唯一索引，但 GlobalExceptionHandler **未登记映射**，
+      会落入 UNKNOWN 分支 → CONFLICT(409) + warn 日志。
+      实际不可达（sort_order 由服务端按序生成，非用户输入）。见 issues.yaml I-01。
+
+  - "index: "(未识别的任何索引)""
+    maps_to: CONFLICT
+    code: 409
+    side_effect: "打 warn 日志：未映射的唯一约束冲突"
+
+# ─────────────────────────────────────────────
+# 四、断言纪律（AI 生成用例必须遵守）
+# ─────────────────────────────────────────────
+assertion_discipline:
+  validation_message_rule:
+    fact: >-
+      GlobalExceptionHandler 对三类校验异常都使用 stream().findFirst()，
+      即**只取第一个**字段错误的文案。
+    consequence: >-
+      当一个请求体**同时违反多个字段约束**时，返回哪条文案取决于
+      Spring 收集 FieldError 的顺序，**不保证稳定**。
+    rule: >-
+      ① 构造**只违反一条约束**的输入 → 可精确断言 message。
+      ② 多约束同时命中 → **只断言 code=400**，并在注释里说明为什么不断言文案。
+    source: backend/src/main/java/com/miqu/exception/GlobalExceptionHandler.java（三个校验 handler）
+    corroborated_by: backend/src/test/java/com/miqu/auth/AuthControllerTest.java:17-26（项目已有同样纪律）
+
+  path_param_regex:
+    fact: >-
+      免登录白名单中的路径参数带正则约束，形如 {id:[0-9]+}
+      （见 api/conventions.yaml 的 auth_whitelist）。
+    consequence: >-
+      对这些端点传非数字 id（如 /api/posts/abc），会因**路径不匹配**落入
+      NoResourceFoundException → code=404 "请求的资源不存在"，
+      **而不是** 400 "参数格式不正确：id"。
+    rule: 断言"非法 id 格式"类用例前，先确认该端点路径是否带 [0-9]+ 约束，两者的预期码不同。
+    confidence: INFERRED
+    inference_basis: >-
+      由 Spring MVC 路径匹配语义推断（正则不匹配则 handler 不命中）。
+      未在本项目中找到直接断言此行为的测试用例。
+      → AI 若要用此结论，应先写一条探测用例实测确认，不要直接当作既定事实断言。
+
+  forbidden_assertions:
+    - "wrong: "assert response.status_code == 403""
+      why: "/api/** 的 HTTP 状态恒为 200，此断言永远为假"
+      right: "assert response.code == 403"
+    - wrong: "assert response.status_code == 200  # 当作成功断言"
+      why: "恒为真，等于没断言"
+      right: "assert response.ok  # 即 code == 200"
+    - "wrong: 'assert response.message == "参数校验失败"'"
+      why: "校验失败时 message 被替换为具体字段文案，几乎从不返回这条"
+      right: '断言具体字段文案，如 "用户名长度必须在 4~20 个字符之间"'
+    - wrong: 'assert response.message == "评论内容不能为空"  # 归因于 EMPTY_COMMENT'
+      why: "该文案真实存在且可断言，但来源是 DTO @NotBlank 而非 EMPTY_COMMENT（死枚举）"
+      right: "文案可断言，但规则溯源必须写 PARAM_INVALID / CommentCreateRequest"
+    - wrong: 'assert response.code == 403  # 账号被禁用'
+      why: "本项目禁用码是 423，不是 403"
+      right: "assert response.code == 423"

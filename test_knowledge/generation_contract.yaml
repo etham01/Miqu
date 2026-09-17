@@ -1,0 +1,299 @@
+# AI Test Generation Contract
+#
+# 用途：规定「**另一个 AI 应该如何使用这套测试知识生成用例**」——
+#       输入什么、必须先读什么、生成什么形状、怎么校验、怎么重试、怎么交付可执行代码。
+#
+# 为什么必须单独成文：
+#   前面所有文件都是"事实/规则/策略"，但没有任何一个规定**流程与输出形状**。
+#   没有这份契约，AI 生成的结果就无法被程序校验，也就无法自动重试。
+#
+# 消费者：
+#   Orchestrator（流程编排）
+#   LLM（按本契约生成）
+#   Pydantic（本文件的 output_schema 就是它的模型定义来源）
+#   BusinessValidator / CoverageValidator（本文件的 validation 段就是验收标准）
+#   Executor（本文件的 execution 段就是交付门槛）
+#
+# 真相来源：本知识库其它文件的收敛表达 + 项目实际可执行性约束
+# confidence: CONFIRMED
+# verified_at: 2026-09-17
+
+meta:
+  generated_at: 2026-09-17
+  contract_version: "1.0"
+  target_system: "AI Test Assistant（生成 → 校验 → 修复 → 执行 → 分析）"
+  knowledge_base_root: test_knowledge/
+  blocking_rule: >-
+    🔴 下列任一情况**必须拒绝生成或要求补充输入**，不得凭常识兜底：
+      · 目标 feature / api / rule 在知识库中不存在
+      · requirement 里的验收点无法映射到任何 rule 或 api
+      · 引用了 confidence 为 UNKNOWN 的事实
+
+# ═══════════════════════════════════════════════════════════════
+# 1. INPUT（调用方必须提供什么）
+# ═══════════════════════════════════════════════════════════════
+input:
+  required:
+    - name: requirement
+      type: string
+      desc: "自然语言的测试需求，一句话到一段话"
+      example: "验证非互关用户不能发送私信，且被拒时不产生任何数据"
+      validation: "必须能从中提取出至少一个可映射到 rule 或 api 的验收点"
+
+    - name: target_feature
+      type: string
+      desc: "目标功能域，取值必须是 coverage_matrix.yaml → features[].id 之一"
+      allowed_values: [F-AUTH, F-USER, F-SEARCH, F-FOLLOW, F-POST, F-LIKE, F-COMMENT, F-CONV, F-MSG,
+                       F-NOTI, F-REPORT, F-REPORT-HANDLE, F-FILE, F-SYS, F-ADMIN, F-FRONTEND]
+
+  optional:
+    - name: test_scope
+      type: list
+      desc: "限定范围，避免生成过宽"
+      allowed_values: [positive, negative, boundary, permission, state, concurrency, all]
+      default: all
+    - name: target_framework
+      type: enum
+      values: [pytest, junit, browser, auto]
+      default: auto
+      note: "auto → 由 execution/framework_routing 的规则决定"
+    - name: max_cases
+      type: int
+      default: 30
+      max: 30
+    - name: exclude_rules
+      type: "list[rule_id]"
+      desc: "显式排除某些规则（如已知缺口）"
+
+  on_missing:
+    rule: "缺 required 字段 → 要求补充，**不要自行假设** target_feature"
+
+# ═══════════════════════════════════════════════════════════════
+# 2. GROUNDING（生成前必须读的文件，缺一不可）
+# ═══════════════════════════════════════════════════════════════
+grounding:
+  hard_required:
+    desc: "**必须读**，否则生成的用例必然在事实层出错"
+    files:
+      - {file: api/endpoints.yaml, why: "端点、方法、路径、参数名、错误码的唯一来源"}
+      - {file: rules/business_rules.yaml, why: "业务规则的唯一来源"}
+      - {file: ai_grounding.yaml, why: "禁止假设清单（38 条）；不读就会凭常识补全"}
+      - {file: test_policy.yaml, why: "决定生成哪些类别"}
+    enforce: "Orchestrator 应在 prompt 里显式注入这四个文件的相关片段；未注入则拒绝生成"
+
+  required_by_scope:
+    - {scope: positive, files: [api/conventions.yaml, rules/side_effects.yaml]}
+    - {scope: boundary, files: [data/data_model.yaml, data/test_data.yaml]}
+    - {scope: negative, files: [api/error_codes.yaml]}
+    - {scope: permission, files: [permissions/permission_matrix.yaml]}
+    - {scope: state, files: [states/state_machines.yaml]}
+    - {scope: concurrency, files: [rules/side_effects.yaml, execution/pytest_contract.yaml]}
+    - {scope: "任何叠加违规", files: [rules/validation_order.yaml], enforce: "**强制**"}
+
+  always_required_for_code:
+    files:
+      - {file: execution/pytest_contract.yaml, why: "夹具名、ApiClient API、断言范式"}
+      - {file: execution/junit_contract.yaml, why: "基类 API、MockMvc 写法"}
+      - {file: execution/browser_contract.yaml, why: "浏览器层的断言 ID 约定与触发手法"}
+
+  deduplication:
+    file: existing_tests.yaml
+    rule: "生成前先查该文件，避免重复已充分覆盖的用例；优先选 incremental_opportunities"
+
+  retrieval_order: |
+    Requirement
+      ↓
+    coverage_matrix.yaml        找 target_feature 对应的 apis 与 rule_domains
+      ↓
+    api/endpoints.yaml          取这些端点的完整事实
+    rules/business_rules.yaml   取这些域的规则
+      ↓
+    data/ + permissions/ + states/ + rules/validation_order.yaml    补齐上下文
+      ↓
+    test_policy.yaml            决定生成哪些类别
+      ↓
+    existing_tests.yaml         去重
+      ↓
+    execution/*.yaml            决定代码形状
+
+# ═══════════════════════════════════════════════════════════════
+# 3. GENERATION（生成什么形状）
+# ═══════════════════════════════════════════════════════════════
+generation:
+  required_categories:
+    source: test_policy.yaml → required_categories
+    rule: "生成结果必须覆盖 test_policy 中与 target_feature 相关的必需类别"
+  max_cases: 30
+  priority_strategy:
+    rule: "P0 → P1 → P2；同级按「能抓到的缺陷严重度」排序"
+    p0_examples: ["叠加违规预期码", "非互关 403", "越权 403/404", "并发唯一键兜底", "上传安全"]
+  step_limits:
+    note: "单次生成的用例数超过 max_cases 时，**按优先级截断**并在输出里说明被截断了什么"
+  hard_constraints:
+    - "不得调用 api/endpoints.yaml 之外的端点"
+    - "不得使用 api/endpoints.yaml 未列出的参数名"
+    - "不得引用不存在的 rule_id / error_code / 角色 / 状态"
+    - "不得为 rules/validation_order.yaml §4 的死分支生成用例"
+    - "不得断言 HTTP 状态码（/uploads/** 除外）"
+    - "不得使用绝对计数断言（种子基准除外）"
+  output_shape:
+    desc: "每条用例必须能被 Pydantic 校验通过"
+    case_schema:
+      id: "str，唯一；前缀属于 14 个合法前缀"
+      title: "str，一句话"
+      category: "str，属于 test_policy.required_categories 之一"
+      traceability:
+        feature: "coverage_matrix.features[].id"
+        api: "api/endpoints.yaml 的端点 id"
+        rules: "list[rule_id]，每个都必须真实存在"
+      precondition: "list[str]，每条都必须可构造（种子已有或 fresh_user 可自建）"
+      action:
+        method: "GET|POST|PUT|DELETE"
+        path: "str，逐字来自 endpoints.yaml"
+        auth: "anonymous|user|admin"
+        params: "dict | null"
+        body: "dict | null"
+      expected:
+        code: "int，来自 error_codes.yaml 的 code"
+        error_code: "str | null，来自 error_codes.yaml 的 name"
+        message: "str | null；仅当 message_assertable 为 true 时才可断言"
+        data_assertions: "list[str] | null"
+        side_effect_assertions: "list[str] | null，依据 rules/side_effects.yaml"
+      cleanup: "str，或明确写「无需清理」"
+      note: "str | null"
+
+# ═══════════════════════════════════════════════════════════════
+# 4. VALIDATION（四道闸门）
+# ═══════════════════════════════════════════════════════════════
+validation:
+  gate_1_schema:
+    enabled: true
+    what: "Pydantic 校验 output_shape.case_schema 的字段完整性与类型"
+    fail_action: "拒绝，不进入后续闸门"
+  gate_2_business:
+    enabled: true
+    what: "逐条比对事实正确性"
+    checks:
+      - "预期 code + error_code 与规则定义一致"
+      - "叠加违规的预期码与 rules/validation_order.yaml 的层序一致（**最高频的失败点**）"
+      - "参数名与 data_model.yaml 的字段名一致"
+      - "引用的 branch 不在死分支清单里"
+      - "命中的 forbidden_assumptions 清单（ai_grounding.yaml，38 条）"
+    fail_action: "回灌给 LLM 重生成，附上具体违反项"
+  gate_3_coverage:
+    enabled: true
+    what: "按 coverage_matrix.yaml §10 的 8 条 gate 判定"
+    fail_action: "回灌缺失的 category / feature / 身份维度，要求补齐"
+  gate_4_executability:
+    enabled: true
+    source: execution/pytest_contract.yaml → executability_gates（10 条）
+    what: "夹具名存在、前置可构造、可重复运行、无绝对值依赖"
+    fail_action: "标为不可执行，不交付给 Executor（而不是「先跑跑看」）"
+
+# ═══════════════════════════════════════════════════════════════
+# 5. RETRY / REPAIR
+# ═══════════════════════════════════════════════════════════════
+retry:
+  enabled: true
+  max_retries: 3
+  backoff: "无（生成很快，直接重试）"
+  repair_hints:
+    desc: "把失败原因翻译成 LLM 可操作的指令，而不是把原文错误扔回去"
+    mapping:
+      - {failure: "rule_id 不存在", hint: "该 ID 在 rules/business_rules.yaml 中不存在，请从目标域的实际 ID 里选择"}
+      - {failure: "预期码与校验顺序不符", hint: "该组合违反了 rules/validation_order.yaml §1 的层序，实际应先命中 <layer N> 的码"}
+      - {failure: "断言的码不可达", hint: "该分支在 validation_order.yaml §4 死分支清单中，请断言 <实际可达的码>"}
+      - {failure: "命中 forbidden_assumption", hint: "违反 ai_grounding.yaml FA-xx，本项目的实际行为是 <reality>"}
+      - {failure: "夹具名不存在", hint: "可用夹具见 pytest_contract.yaml §3，共 9 个"}
+      - {failure: "缺 category", hint: "该 requirement 还需覆盖 <缺失类别>"}
+      - {failure: "含绝对计数断言", hint: "改为差值写法（XC-007），或改用种子基准"}
+      - {failure: "重复已有用例", hint: "该场景已被 <file> 覆盖，请改为生成 incremental_opportunities 中的空白项"}
+  escalate:
+    after_retries: 3
+    action: "标记为需人工介入，输出失败原因清单；**不得放宽校验让它通过**"
+
+# ═══════════════════════════════════════════════════════════════
+# 6. EXECUTION（交付可执行代码）
+# ═══════════════════════════════════════════════════════════════
+execution:
+  executable_only: true
+  rule: "未通过 gate_4 的用例**不得**交给 Executor 生成代码"
+  framework_routing:
+    desc: "按这条规则决定代码落到哪个套件"
+    rules:
+      - {if: "涉及并发竞态", then: pytest}
+      - {if: "涉及真实文件 I/O（上传）", then: pytest}
+      - {if: "需要验证端到端契约（序列化 / 过滤器链）", then: pytest}
+      - {if: "是规则密集的分支覆盖，且需要构造「API 达不到的前置」", then: junit}
+      - {if: "依赖种子绝对值断言", then: junit}
+      - {if: "后端返回正确时问题仍然存在（前端状态一致性 / UI 降级）", then: browser}
+    conflict_resolution: "出现多条命中时按上表**从上到下**取第一条；并在输出的 note 里写明理由"
+  code_generation:
+    must_follow: execution/pytest_contract.yaml 或 junit_contract.yaml 或 browser_contract.yaml 的 templates
+    forbidden:
+      - "自定义 HTTP 客户端（必须用 ApiClient / MockMvc）"
+      - "自定义 token 拼装（用 login() / seed_*_client / fresh_user）"
+      - "assert response.status_code"
+  preflight:
+    order: "重置库 → mvn test → 再重置库 → 启后端 → pytest → 浏览器回归"
+    note: "JUnit 需要干净种子；pytest 幂等"
+
+# ═══════════════════════════════════════════════════════════════
+# 7. 流水线各阶段的输入/输出（供 Orchestrator 实现）
+# ═══════════════════════════════════════════════════════════════
+pipeline:
+  stages:
+    - {n: 1, name: Requirement Intake, in: requirement, out: "结构化需求（feature + scope + 验收点）",
+       validate: "target_feature 必须合法；验收点必须可映射"}
+    - {n: 2, name: Feature Retrieval, in: "结构化需求", out: "feature 记录",
+       reads: [coverage_matrix.yaml]}
+    - {n: 3, name: API + Rule Retrieval, in: "feature 记录", out: "端点子集 + 规则子集",
+       reads: [api/endpoints.yaml, rules/business_rules.yaml]}
+    - {n: 4, name: Context Enrichment, in: "前一步产物", out: "含边界/权限/状态/顺序的完整上下文",
+       reads: [data/, permissions/, states/, rules/validation_order.yaml, rules/side_effects.yaml]}
+    - {n: 5, name: Grounding, in: "完整上下文", out: "可用事实集 + 禁止清单",
+       reads: [ai_grounding.yaml]}
+    - {n: 6, name: Scenario Generation, in: "可用事实集", out: "场景列表",
+       reads: [test_policy.yaml]}
+    - {n: 7, name: Case Generation, in: "场景列表", out: "用例集（output_shape.case_schema）"}
+    - {n: 8, name: Schema Validation, in: "用例集", out: "通过/失败", gate: gate_1_schema}
+    - {n: 9, name: Business Rule Validation, in: "用例集", out: "通过/失败", gate: gate_2_business}
+    - {n: 10, name: Coverage Validation, in: "用例集", out: "通过/失败", gate: gate_3_coverage}
+    - {n: 11, name: Retry / Repair, in: "失败原因", out: "修订后的用例集",
+       reads: [retry.repair_hints], max: 3}
+    - {n: 12, name: Executability Screening, in: "通过校验的用例", out: "可执行用例", gate: gate_4_executability}
+    - {n: 13, name: Code Generation, in: "可执行用例", out: "pytest / JUnit / browser 代码",
+       reads: [execution/]}
+    - {n: 14, name: Execution, in: "代码", out: "执行结果"}
+    - {n: 15, name: Result Analysis, in: "执行结果", out: "缺陷定位 / 覆盖增量",
+       reads: [existing_tests.yaml, coverage_matrix.yaml]}
+
+# ═══════════════════════════════════════════════════════════════
+# 8. 本项目的可自动化性摸底（哪些真的能自动执行）
+# ═══════════════════════════════════════════════════════════════
+automation_readiness:
+  desc: >-
+    诚实评估：这套知识库支撑的自动化程度到哪。**不要假装全部可自动化。**
+  ready:
+    - "API 层用例：pytest / JUnit 全自动（知识库已含夹具、断言范式、可执行性门槛）"
+    - "并发用例：pytest 全自动（有现成的 _race / _clone 范式）"
+    - "上传用例：pytest 全自动（有内存构造图片字节的模板）"
+    - "浏览器状态一致性：全自动（有断言 ID 约定与触发手法）"
+  partially_ready:
+    - what: "数据库层断言"
+      gap: "项目**没有** pytest 的数据库夹具，需要 Agent 自己连 MySQL"
+      mitigation: "pytest_contract.yaml T-09 给了 mysql CLI 的模板"
+    - what: "状态前置构造"
+      gap: "部分状态（user.deleted）**只能改库**，没有接口"
+      mitigation: "workflows.yaml setup_snippets S-04 明确承认并给了做法"
+  not_ready:
+    - {what: "数十线程压测", why: "只做到 8 线程（CONC-007）"}
+    - {what: "前端单元测试", why: "项目未引入前端测试框架（有意取舍）"}
+    - {what: "性能断言", why: "只有 PERFORMANCE_TEST_PLAN.md 的计划，未实现"}
+
+ai_checklist:
+  - "生成前：确认已注入 §2 的四个 hard_required 文件"
+  - "生成中：每条用例按 §3 output_shape 组装，不自由发挥字段"
+  - "生成后：逐道过四道闸门，不达标就走 §5 retry（最多 3 次）"
+  - "交付前：按 §6 framework_routing 选套件，套用对应 templates"
+  - "命中 §meta.blocking_rule 任一情况 → 直接拒绝并说明，不要兜底"

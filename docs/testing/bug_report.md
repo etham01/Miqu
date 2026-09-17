@@ -24,13 +24,16 @@
 **基线对照**
 
 ```
-                修复前                     修复后
-pytest:   246 collected / 246 passed  →   248 collected / 248 passed / 0 failed
-JUnit:    289 run       / 0 failures  →   291 run       / 0 failures / 0 errors
-浏览器:     5 PASS      / 6 FAIL      →    12 PASS     / 0 FAIL   (exit 0)
-前端构建:                              →   vue-tsc 0 error / vite build 成功
-一致性:                                →   check_consistency.py exit 0
+                最初          第一轮(09-14)           第二轮(09-16 头像)         当前
+pytest:   246 passed   →   248 passed / 0 failed   →   250 passed / 0 failed
+JUnit:    289 run      →   291 run / 0 failures    →   291 run / 0 failures
+浏览器:     5 PASS/6 FAIL →  12 PASS / 0 FAIL       →   15 PASS / 0 FAIL   (exit 0)
+前端构建:                                                vue-tsc 0 error / vite build 成功
+用例一致性:                                              check_consistency.py exit 0
 ```
+
+> 各 Bug 章节里的「完整测试」行记录的是**该 Bug 修复当时**的实测结果，属时间点记录；
+> 当前基线以本节为准。
 
 > ⚠️ **任务书里的「pytest 基线 215 passed」与仓库实际不符。**
 > 实测基线是 **246**（2026-09-14 15:2x 扩到 246，见 `.workbuddy/memory/2026-09-14.md`）。
@@ -47,9 +50,13 @@ JUnit:    289 run       / 0 failures  →   291 run       / 0 failures / 0 error
 | BUG-003 | 搜索：首次在飞时换关键词，地址栏与结果不一致 | P2 | **FIXED** | 3/3 PASS |
 | BUG-004 | 通知：列表在飞时切类型筛选，标签与数据不一致 | P2 | **FIXED** | 2/2 PASS |
 | BUG-005 | 头像 URL 未校验 `/uploads/` 前缀，可写入任意外链 | P2 | **FIXED** | pytest 2 + JUnit 2，全通过 |
+| BUG-006 | 头像加载失败无兜底，取不到就是永久破图（全站 15 处共用组件） | **P1** | **FIXED** | 3/3 PASS |
+| BUG-007 | 静态资源 404 被包成 `HTTP 200 + JSON`，`<img>` 解码失败 | P2 | **FIXED** | pytest 2，全通过 |
+| BUG-008 | 头像接口不校验目标文件是否存在 | P2 | **⏸ 待决策** | — |
 
 BUG-002 / 003 / 004 是**同一个根因**在三处入口的三种表现，合并计入「缺陷族」但分开登记，便于逐条回归。
-**未解决 P0/P1/P2：0 个。**
+**未解决 P0/P1/P2：BUG-008（P2）待决策，其余 0 个。**
+BUG-006/007/008 的完整诊断过程另见 [`avatar-issue-diagnosis.md`](avatar-issue-diagnosis.md)。
 
 ---
 
@@ -774,6 +781,201 @@ BUG-005
 
 ---
 
+## BUG-006：头像加载失败无兜底，取不到就是永久破图
+
+### 1. 发现 Bug
+
+**状态：** `FIXED`　**严重程度：** P1　**发现方式：** 用户反馈 + 真实浏览器复现
+
+**症状：** "头像图片无法加载"。
+
+**复现步骤：**
+
+1. 给账号设一个「前缀合法、但磁盘上不存在」的头像路径（接口会接受）
+2. 真实 Chrome 打开该用户主页
+
+**实际（修复前）：**
+
+```
+<img> ... naturalWidth=0  → ★破图
+<img> ... naturalWidth=0  → ★破图
+首字母占位 span 数量 = 0   ← 本应降级到占位，但没有
+```
+
+**预期：** 取不到的头像退化成首字母占位，与"没配头像"表现一致。
+
+### 2. 分析 / 定位原因
+
+**相关模块：** Frontend / 头像渲染
+
+**根因：** `frontend/src/components/UserAvatar.vue` 只有 `v-if="src"`——
+判断的是"**有没有配**头像"，不是"**能不能取到**"。缺 `@error` 兜底。
+
+**为什么影响面是全站**：全项目 15 处头像（`DefaultLayout` / `PostCard` / `CommentList` /
+`PostEditor` / `UserCard` / `MessageView` / `NotificationView` / `AdminLayout` /
+5 个后台管理页）全部渲染同一个 `UserAvatar`，没有第二处自行拼 `<img>`。
+所以这一处缺兜底 → **全站头像一起表现为"加载不出来"**。
+
+```text
+Root Cause:
+UserAvatar 只有"有无 src"的判断，没有"加载成功与否"的判断。
+URL 非空但内容取不到时（外链被拦 / 文件缺失 / 返回非图片内容），
+<img> 永久停留在解码失败态，既不降级占位也不会自愈。
+```
+
+### 3. AI 辅助修改
+
+**修改文件：** `frontend/src/components/UserAvatar.vue`（唯一改动点，净 +14 行）
+
+```vue
+const failed = ref(false)
+watch(() => props.src, () => { failed.value = false })      // 换头像后重试
+const showImage = computed(() => Boolean(props.src) && !failed.value)
+```
+```vue
+<img v-if="showImage" :src="src!" ... @error="failed = true" />
+<span v-else class="miqu-avatar miqu-avatar--fallback" ...>…</span>
+```
+
+**修改原则：** 最小修改（只改一个组件）/ 不改后端契约 / 不改既有测试期望 / 不重构
+
+**回归测试：** `tests/browser_regression.mjs` 的 `BUG-006.a` ~ `BUG-006.c`（YAML：`CONC-012`）
+
+### 4. 回归验证
+
+```
+Before Fix:  破图 <img> 2 个；首字母占位 span 0 个          → FAIL
+After Fix:   破图 <img> 0 个；首字母占位 span 2 个          → PASS
+             [BUG-006.a] 造出一个指向不存在文件的头像        PASS
+             [BUG-006.b] 页面上不再有解码失败的 <img> 头像    PASS
+             [BUG-006.c] 取不到的头像降级成了首字母占位        PASS
+```
+
+**专项测试：** PASS（3/3）　**完整测试：** pytest 250 passed / 0 failed；JUnit 291 / 0 failures
+**手工验证：** PASS（真实 Chrome + 截图 `.workbuddy/screenshots/bug006-avatar-fallback.png`）
+
+### 5. 最终结论
+
+```text
+BUG-006
+状态：FIXED
+严重程度：P1（用户可见的"功能坏了"，且影响全站 15 处）
+根因：UserAvatar.vue 缺 @error 兜底，只有"有无 src"判断
+修复：加 failed 状态 + @error + watch(src) 重试（唯一改动点）
+回归：PASS（BUG-006.a/b/c）
+```
+
+---
+
+## BUG-007：静态资源 404 被包成 `HTTP 200 + JSON`
+
+### 1. 发现 Bug
+
+**状态：** `FIXED`　**严重程度：** P2　**发现方式：** API 测试 + Code Review
+
+**实测（修复前）：**
+
+```
+GET /uploads/image/2026/09/definitely-not-exist.png
+  -> http=200  content-type=application/json
+     {"code":404,"message":"请求的资源不存在","data":null}
+```
+
+**预期：** 缺失的静态资源返回**真正的 HTTP 404**。
+
+### 2. 分析 / 定位原因
+
+**根因：** `GlobalExceptionHandler` 的"业务失败 HTTP 恒 200"约定被静态资源共用——
+`handleNoResource` 用同一分支处理了 `/api/**` 与 `/uploads/**`。
+
+**影响：**
+1. `<img>` 拿到一段 JSON 去解码，必然失败 → 破图（**BUG-006 的直接放大器**）；
+2. 缓存层把"不存在的资源"当成一次成功响应，语义失真（CDN/浏览器都可能错误缓存）。
+
+### 3. AI 辅助修改
+
+**修改文件：** `backend/src/main/java/com/miqu/exception/GlobalExceptionHandler.java`
+
+按请求 URI 分流：落在上传前缀下的返回 `404`，其余沿用 `200`。
+**这条是有意偏离项目级约定的例外**，所以同时加了一条对照用例
+`test_unknown_api_path_keeps_http_200`，防止后人把例外推广到业务接口。
+
+**回归测试：** `tests/api/test_file.py::test_missing_uploaded_file_returns_real_404`
+（YAML：`SEC-012`）
+
+### 4. 回归验证
+
+```
+静态缺失文件   : http=404                     （修复前 200）
+/api 未映射路径: http=200（约定未动）
+真实存在的图片 : http=200 + image/png          （未受影响）
+pytest: 250 passed / 0 failed        JUnit: 291 run / 0 failures
+```
+
+### 5. 最终结论
+
+```text
+BUG-007
+状态：FIXED
+严重程度：P2
+根因：静态资源与业务接口共用同一个 404 兜底，被"HTTP 恒 200"约定污染
+修复：按 URI 分流，静态资源返回真 404；/api/** 契约不变（并有对照用例钉住）
+回归：PASS（pytest 2 条）
+```
+
+---
+
+## BUG-008：头像接口不校验目标文件是否存在 ⏸
+
+### 1. 发现 Bug
+
+**状态：** `CONFIRMED（待决策，未修改）`　**严重程度：** P2
+
+**实测：** `PUT /api/users/me/avatar` 接受 `/uploads/image/2026/09/definitely-not-exist.png`
+（磁盘上不存在）→ `200 success`，并把该路径写进库。
+库里的 `id=237` 就是这样产生的坏头像。
+
+### 2. 分析 / 定位原因
+
+`UserServiceImpl.updateAvatar` 与 BUG-005 是**同一个方法的两半**：
+BUG-005 补了"来源前缀"校验，没补"文件真实存在"校验。
+
+### 3. 为什么没有直接改（关键）
+
+**修法本来只有 5 行，但它会打破 2 条既有用例**——这两条引用的路径，磁盘上都不存在：
+
+| 用例 | 传的 avatar | 断言 | 磁盘上是否存在 |
+|---|---|---|---|
+| `tests/api/test_user.py::test_update_avatar` | `/uploads/image/2026/09/qa-avatar.jpg` | `200` + 回读一致 | ❌ |
+| `UserControllerTest#updateAvatar_success` | `/uploads/image/2026/09/newavatar.jpg` | `$.code == 200` | ❌ |
+
+即：**这两条用例目前把"可以设置一个不存在的文件"当成了预期行为。**
+
+按项目自己的纪律（`README.md`、`docs/TESTING_GUIDELINES.md`）：
+> 测试与业务规则冲突时，停下来报告，**不要改测试来让代码通过**。
+
+所以本轮**没有动它们**，也没有改代码。
+
+**三个可选方向（需拍板）：**
+
+| 方案 | 内容 | 代价 |
+|---|---|---|
+| A（推荐） | 把两条用例改成"先真上传一张图，再把返回 URL 设为头像" | 用例更强更真实；`UserControllerTest` 需走一次 multipart 或造临时文件 |
+| B | 只加"拒绝路径穿越"（`../`），不校验存在性 | 零冲突，但挡不住"指向不存在的文件" |
+| C | 不改代码，登记为已知缺口 | BUG-006 的兜底已让坏头像表现正常，对**当前症状**而言非必需 |
+
+### 4. 最终结论
+
+```text
+BUG-008
+状态：CONFIRMED（待决策）
+严重程度：P2（加固项：防止产生坏数据，而非当前症状的成因）
+根因：updateAvatar 未校验目标文件存在（与前缀校验不同层）
+修复：未执行 —— 需先决定如何处理那 2 条把旧行为当预期的用例
+```
+
+---
+
 ## 附：Possible Issue（发现风险，但本轮无法确认为缺陷）
 
 > 以下条目**均未修改代码**。按任务书要求，不能确证的一律不许动手。
@@ -847,7 +1049,7 @@ BUG-005
 | `test_cases/check_consistency.py` | 校验器增强 | 支持 `browser` 指针（前端用例不归 pytest 收集） |
 | `test_cases/README.md`、`core_business_rules.yaml` | 数字与缺口同步 | 98 条 / 96 implemented / 2 gap |
 | `docs/testing/TEST_CASE_SCHEMA.md` | 规范补充 | §5.1 `browser` 字段与自动校验 |
-| `docs/testing/TEST_EXECUTION_REPORT.md`、`MIQU_TEST_SYSTEM.md`、`TEST_COVERAGE_MATRIX.md`、`API_DOCUMENT_AUDIT.md` | 数字与状态同步 | 248 / 291 / 539 / 12 |
+| `docs/testing/TEST_EXECUTION_REPORT.md`、`MIQU_TEST_SYSTEM.md`、`TEST_COVERAGE_MATRIX.md`、`API_DOCUMENT_AUDIT.md` | 数字与状态同步 | 250 / 291 / 541 / 15 |
 | `tests/README.md`、`docs/api/README.md`、`README.md` | 数字与缺口同步 | 同上 |
 | `docs/testing/bug_report.md` | 文档 | 本文件 |
 | `.workbuddy/tools/*.py`、`*.mjs` | 只读探针（5 个） | 复现与定位，不进测试套件 |
@@ -863,34 +1065,35 @@ BUG-005
 
 ```
 已知 Bug
-   ↓  全部确认（BUG-001 证伪；BUG-002~005 复现）
+   ↓  全部确认（BUG-001 证伪；BUG-002~008 复现）
 P0 / P1 / P2 已修复
-   ↓  4 个 P2 全部 FIXED（P0/P1 本就不存在）
+   ↓  BUG-002~007 共 6 个 FIXED；BUG-008（P2）待决策 —— 它撞上了 2 条既有用例，按纪律停下上报
 都有回归测试
-   ↓  BUG-002/003/004 → 浏览器 8 项断言；BUG-005 → pytest 2 + JUnit 2
+   ↓  BUG-002/003/004/006 → 浏览器 11 项断言；BUG-005 → pytest 2 + JUnit 2；BUG-007 → pytest 2
 专项测试通过
-   ↓  browser_regression.mjs 12/12 PASS（exit 0）
+   ↓  browser_regression.mjs 15/15 PASS（exit 0）
 相关模块通过
-   ↓  self / follow / post / search / user / notification 全绿
+   ↓  self / follow / post / search / user / notification / file 全绿
 全量测试通过
-   ↓  pytest 248 passed / 0 failed；JUnit 291 run / 0 failures / 0 errors
+   ↓  pytest 250 passed / 0 failed；JUnit 291 run / 0 failures / 0 errors
 bug_report.md 完整
    ↓  本文件
 ```
 
 | 验收项 | 结果 |
 |---|---|
-| 发现的 Bug 候选 | 5（BUG-001~005） |
-| Confirmed Bug | **4**（002 / 003 / 004 / 005） |
+| 发现的 Bug 候选 | 8（BUG-001~008） |
+| Confirmed Bug | **7**（001 证伪，002~008 确认） |
 | Possible Issue | **7**（见上节，均未动代码——不能确证的不许改） |
 | Not A Bug | **7 条结论**（含 BUG-001 证伪） |
-| 已修复 | **4** |
-| 新增回归测试 | 浏览器 12 项断言 + pytest 2 + JUnit 2 |
-| 最终 pytest | **248 collected / 248 passed / 0 failed** |
+| 已修复 | **6**（002/003/004/005/006/007） |
+| 待决策 | **1**（008：与 2 条既有用例冲突，见其章节） |
+| 新增回归测试 | 浏览器 15 项断言 + pytest 4 + JUnit 2 |
+| 最终 pytest | **250 collected / 250 passed / 0 failed** |
 | 最终 JUnit | **291 run / 0 failures / 0 errors / 0 skipped** |
-| 用例数量变化 | pytest 246 → **248**（+2，未减）；JUnit 289 → **291**（+2，未减） |
-| 未解决 P0/P1/P2 | **0** |
-| 是否建议继续修复 | 本轮范围内已闭环，**不建议再改生产代码**。若要继续，建议只做**验证性**工作：真实弱网下复跑 `browser_regression.mjs`、多浏览器并发场景 |
+| 用例数量变化 | pytest 246 → **250**（+4，未减）；JUnit 289 → **291**（+2，未减） |
+| 未解决 P0/P1/P2 | **1**（BUG-008，P2，加固项；对当前症状非必需） |
+| 是否建议继续修复 | 生产代码已闭环，**不建议再动**。唯一待你决定的是 BUG-008 的走向（改用例 / 只防穿越 / 登记为缺口） |
 
 **数据库前置条件**：JUnit 依赖种子绝对值，运行前已重置
 （`schema.sql` + `data.sql`，21 用户 / 40 动态）；重置前的库已备份到

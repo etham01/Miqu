@@ -1,0 +1,425 @@
+# Miqu 状态机知识库
+#
+# 用途：回答「**哪些状态转换是合法的、非法的转换会得到什么码**」。
+#       生成状态迁移类用例的依据。
+#
+# 为什么必须单独成文：
+#   本项目多数状态**没有"改回去"的接口**。AI 若按"状态可以来回切"的常识设计用例，
+#   会立刻遇到"接口不存在"。反过来，像 report.status 这种有明确终态的，
+#   又必须知道"重复处理是 409 而不是 400"。
+#
+# 消费者：
+#   LLM               → 生成状态迁移用例（正常 / 非法 / 重复 / 逆向 / 越权）
+#   Pydantic          → 校验状态字段名与取值是否真实存在
+#   BusinessValidator → 校验预期码是否符合本文件的转换表
+#   CoverageValidator → 统计"状态 × 转换"覆盖
+#   执行器            → 生成 setup（把资源置到前置状态）
+#
+# 真相来源（逐行读取）：
+#   common/enums/{ReportStatusEnum, UserStatusEnum, ReportActionEnum, TargetTypeEnum,
+#                 NotificationTypeEnum, RoleEnum, GenderEnum, ReportReasonEnum}.java
+#   database/schema.sql（列注释里的取值说明）
+#   service/impl/*.java（允许的转换与拒绝码）
+#
+# confidence: CONFIRMED
+# verified_at: 2026-09-17
+
+meta:
+  generated_at: 2026-09-17
+  enum_count: 8
+  common_pattern: >-
+    ⚠️ **贯穿全库的一条规律：状态是单向的，且没有"改回去"的接口。**
+    只有 user.status 与 follow / post_like 关系是可逆的（后者靠物理删除实现）。
+    其余状态一旦进入终态就无法回退 —— 生成用例时不要设计"再改回来"的步骤。
+  no_delete_api_ref: data/seed_data.yaml → missing_delete_apis
+
+machines:
+
+  # ═══════════════════════════════════════════════════════════════
+  # 1. 举报处置状态机（本项目最完整的一个）
+  # ═══════════════════════════════════════════════════════════════
+  - id: report_status
+    entity: report
+    column: status
+    storage_type: "TINYINT NOT NULL DEFAULT 0"
+    states:
+      - {value: 0, name: PENDING, label: 待处理, kind: initial, terminal: false}
+      - {value: 1, name: HANDLED, label: 已处理, kind: terminal, terminal: true}
+      - {value: 2, name: REJECTED, label: 已驳回, kind: terminal, terminal: true}
+    entry_condition: "POST /api/reports 提交时 status 固定为 0（服务端设定，请求体无此字段）"
+    transition_endpoint: PUT_ADMIN_REPORTS_ID_HANDLE
+    transitions:
+      - from: 0
+        action: "handle(status=1, action=NONE)"
+        to: 1
+        allowed: true
+        expected: {code: 200}
+        effect: "只记录结论，不处置内容"
+        rule: RPT-010
+
+      - from: 0
+        action: "handle(status=1, action=DELETE_POST)（目标必须是评论类举报会 400）"
+        to: 1
+        allowed: true
+        expected: {code: 200}
+        effect: "级联删除被举报的动态（含其评论/图片/点赞/通知）"
+        rule: RPT-009
+
+      - from: 0
+        action: "handle(status=1, action=DELETE_COMMENT)"
+        to: 1
+        allowed: true
+        expected: {code: 200}
+        effect: "级联删除被举报的评论"
+        rule: RPT-009
+
+      - from: 0
+        action: "handle(status=1, action=DISABLE_USER)"
+        to: 1
+        allowed: true
+        expected: {code: 200}
+        effect: "目标 user.status=0 → **其旧 Token 立即失效（423）**"
+        rule: RPT-009
+
+      - from: 0
+        action: "handle(status=2, action=NONE)"
+        to: 2
+        allowed: true
+        expected: {code: 200}
+        effect: "判定未违规"
+        rule: RPT-010
+
+      - from: 0
+        action: "handle(status=2, action=非NONE)"
+        to: null
+        allowed: false
+        expected: {code: 400, error_code: REJECT_WITH_ACTION_NOT_ALLOWED, message: 驳回举报时不能同时执行处置动作}
+        reason: "「判定未违规」与「删除内容」自相矛盾，拦在入口"
+        rule: RPT-007
+
+      - from: 1
+        action: "handle(...)（任何参数）"
+        to: null
+        allowed: false
+        expected: {code: 409, error_code: REPORT_ALREADY_HANDLED, message: 该举报已被处理}
+        reason: "终态不可再处理，否则处置动作会被执行两次"
+        rule: RPT-004
+
+      - from: 2
+        action: "handle(...)（任何参数）"
+        to: null
+        allowed: false
+        expected: {code: 409, error_code: REPORT_ALREADY_HANDLED}
+        rule: RPT-004
+
+      - from: "1 或 2"
+        action: "想改回 0(PENDING)"
+        to: null
+        allowed: false
+        expected: {code: 400, error_code: PARAM_INVALID, message: 处理结论只能是 1（已处理）或 2（已驳回）}
+        reason: "🟢 **接口层就不存在** —— HandleReportRequest.status 的 @Min(1)@Max(2) 直接排除 0。逆向转换在设计上被消除"
+        rule: RPT-007
+
+    illegal_action_values:
+      - {action: "BAN_USER（拼错）", expected: {code: 400, error_code: INVALID_REPORT_ACTION}}
+      - {action: "delete_post（小写）", expected: {code: 200}, note: "ReportActionEnum.of 用 equalsIgnoreCase，**大小写不敏感**"}
+      - {action: "null / 空串", expected: {code: 200}, note: "视为 NONE，不处置"}
+    action_target_matching:
+      rule: "处置动作必须与 targetType 匹配，否则 400 REPORT_ACTION_MISMATCH"
+      matrix:
+        - {action: NONE, allowed_target_types: [1, 2, 3]}
+        - {action: DELETE_POST, allowed_target_types: [2]}
+        - {action: DELETE_COMMENT, allowed_target_types: [3]}
+        - {action: DISABLE_USER, allowed_target_types: [1]}
+    seed_preconditions:
+      pending: "data.sql 中 status=0 的举报若干（可直接处理）"
+      terminal: "status=1 与 status=2 各有 → **可直接测 REPORT_ALREADY_HANDLED(409)，无需 setup**"
+    test_recipes:
+      - "正常转换：取一条 PENDING 举报 + status=1 + action=NONE → 200，再查举报列表确认 status=1"
+      - "重复处理：对上一步的举报再 handle 一次 → 409"
+      - "动作不匹配：对 POST 类举报用 DELETE_COMMENT → 400 REPORT_ACTION_MISMATCH"
+      - "目标已删仍可结案：先删掉举报目标（动态），再 handle → 200"
+      - "禁用级联：对 USER 类举报用 DISABLE_USER → 200 + 目标 user.status=0 + **目标旧 Token 变 423**"
+
+  # ═══════════════════════════════════════════════════════════════
+  # 2. 账号状态机（status 与 deleted 是**两个正交维度**）
+  # ═══════════════════════════════════════════════════════════════
+  - id: user_account
+    entity: user
+    columns: [status, deleted]
+    critical: >-
+      🔴 **status 与 deleted 是两个独立维度，不要混为一谈。**
+      status=0 是"禁用"（可解禁）；deleted=1 是"注销"（不可逆，无接口）。
+    dimensions:
+      status:
+        storage: "TINYINT NOT NULL DEFAULT 1"
+        states:
+          - {value: 0, name: DISABLED, label: 已禁用}
+          - {value: 1, name: NORMAL, label: 正常, kind: initial}
+        transition_endpoint: PUT_ADMIN_USERS_ID_STATUS
+        transitions:
+          - {from: 1, action: "管理员禁用（status=0）", to: 0, allowed: true, expected: {code: 200}}
+          - {from: 0, action: "管理员解禁（status=1）", to: 1, allowed: true, expected: {code: 200}}
+          - {from: "任意", action: "管理员操作自己（id == 自己的 id）",
+             to: null, allowed: false,
+             expected: {code: 400, error_code: CANNOT_OPERATE_SELF, message: 不能对自己执行该操作},
+             rule: USER-014,
+             note: "**先于**目标是否为管理员的判断（实测：status=9 + target=self → 400 PARAM_INVALID 由 Bean Validation 先出）"}
+          - {from: "任意", action: "管理员禁用另一个管理员",
+             to: null, allowed: false,
+             expected: {code: 403, error_code: CANNOT_DISABLE_ADMIN, message: 不能禁用管理员账号},
+             rule: USER-013,
+             reachable: false,
+             unreachable_reason: "种子只有 1 个管理员；禁用自己时 CANNOT_OPERATE_SELF 先命中 → HTTP 层无输入可触达（SEC-004 缺口）"}
+          - {from: "任意", action: "status 传 0/1 以外的值",
+             to: null, allowed: false,
+             expected: {code: 400, error_code: PARAM_INVALID, message: 状态只能是 0（禁用）或 1（正常）},
+             note: "@Min(0)@Max(1) 在 layer 3 先拦"}
+
+      deleted:
+        storage: "TINYINT NOT NULL DEFAULT 0 + @TableLogic"
+        states:
+          - {value: 0, name: ACTIVE}
+          - {value: 1, name: DELETED, kind: terminal}
+        transition_endpoint: "**无**（项目没有删除用户的接口）"
+        how_to_construct: "⚠️ 只能直接改库：UPDATE user SET deleted=1 WHERE id=?——测试里这么做是**有意为之**，不是作弊"
+        effects:
+          - "给已删除账号签发过的 Token 访问受保护端点 → 401（拦截器判定，见 validation_order.yaml AS-01）"
+          - "已删除账号登录 → 401 INVALID_CREDENTIALS"
+          - "以它为目标的关注/私信/举报 → 404 USER_NOT_FOUND"
+          - "它的主页 → 404"
+
+    cross_effects_of_disabling:
+      - "该用户已签发的 Token **下一个请求即失效** → 受保护端点 423（SEC-002）"
+      - "白名单端点仍按游客放行 → 200"
+      - "其主页仍可访问 → 200（USER-011，requireVisibleUser 不检查 status）"
+      - "不能被关注（POST follow 目标 → 423，FOL-006）"
+      - "不能接收私信（POST messages → 423）"
+      - "其历史动态、评论、通知**全部保留**（禁用不删数据）"
+    restore_path: "✅ 解禁：PUT /api/admin/users/{id}/status body status=1 —— 唯一的可逆状态"
+    test_discipline: >-
+      ⚠️ 在测试里禁用 fresh_user 后**必须在 finally 里改回 status=1**，
+      否则这个账号会污染同批次其他用例（项目已有此惯例，见 tests/api/test_auth.py:140-161）。
+
+  # ═══════════════════════════════════════════════════════════════
+  # 3. 关系生命周期（关注 / 点赞 / 图片）—— 物理删除，可逆
+  # ═══════════════════════════════════════════════════════════════
+  - id: follow_relation
+    entity: follow
+    states: [absent, present]
+    kind: "存在性状态机（没有 status 列）"
+    transitions:
+      - {from: absent, action: "POST /api/users/{id}/follow", to: present, allowed: true, expected: {code: 200}, rules: [FOL-001]}
+      - {from: present, action: "POST（重复关注）", to: present, allowed: false, expected: {code: 409, error_code: ALREADY_FOLLOWED}, rule: FOL-002}
+      - {from: present, action: "DELETE /api/users/{id}/follow", to: absent, allowed: true, expected: {code: 200}, rule: FOL-002}
+      - {from: absent, action: "DELETE（未关注就取关）", to: absent, allowed: false, expected: {code: 404, error_code: NOT_FOLLOWED}, rule: FOL-003}
+    reversibility:
+      fact: "**物理删除 → 唯一键立即释放 → 可以立即重新关注**"
+      schema_evidence: "follow 表无 deleted 列；uk_follower_following 唯一键"
+      test_recipe: "关注 → 取关 → 再关注 → 断言 200（第二轮必须成功，这是 LIKE-002/FOL-002 的核心）"
+    concurrency: "并发重复关注收敛为 1 行，计数只 +1（CONC-002 / CONC-003）"
+
+  - id: post_like_relation
+    entity: post_like
+    states: [absent, present]
+    transitions:
+      - {from: absent, action: "POST /api/posts/{id}/like", to: present, allowed: true, expected: {code: 200}, rule: LIKE-001}
+      - {from: present, action: "POST（重复点赞）", to: present, allowed: false, expected: {code: 409, error_code: ALREADY_LIKED}, rule: LIKE-002}
+      - {from: present, action: "DELETE /api/posts/{id}/like", to: absent, allowed: true, expected: {code: 200}, rule: LIKE-002}
+      - {from: absent, action: "DELETE（未点赞就取消）", to: absent, allowed: false, expected: {code: 404, error_code: NOT_LIKED}, rule: LIKE-003}
+    reversibility:
+      fact: "物理删除 → 取消后可**立即重新点赞**"
+      schema_evidence: "post_like 表无 deleted 列；uk_post_user 唯一键"
+      test_recipe: "点赞 → 取消 → 再点赞 → 断言 200 且 likeCount 回到 +1"
+
+  - id: post_image_membership
+    entity: post_image
+    states: [present]
+    note: >-
+      只在发布动态时批量 INSERT，随 post 删除而**物理删除**。
+      没有单独的图片增删接口（PostCreateRequest 一次性提交 images 数组）。
+      → 不要生成"给已有动态追加一张图片"的用例。
+    unique_key: "uk_post_sort (post_id, sort_order) —— 同一动态内 sort_order 唯一"
+    ordering: "sort_order = images 数组下标（0 起），读取按 sort_order ASC"
+
+  # ═══════════════════════════════════════════════════════════════
+  # 4. 会话可见性与未读（两个派生状态）
+  # ═══════════════════════════════════════════════════════════════
+  - id: conversation_visibility
+    entity: conversation
+    desc: "会话的「是否出现在列表里」是由 last_message_time 派生的状态，不是显式字段"
+    states:
+      - {name: EMPTY, condition: "last_message_time IS NULL", listed: false, how: "打开会话但一条消息都没发"}
+      - {name: ACTIVE, condition: "last_message_time IS NOT NULL", listed: true, how: "发出第一条消息后"}
+    transitions:
+      - {from: EMPTY, action: "POST /api/messages（发出第一条）", to: ACTIVE, allowed: true, expected: {code: 200}}
+      - {from: ACTIVE, action: "无任何回退接口", to: null, allowed: false, note: "会话无法删除，也无法清空"}
+    list_filter: "ConversationServiceImpl.list 带 .isNotNull(last_message_time) —— **过滤空会话**"
+    test_recipe: >-
+      用 fresh_users 打开会话（不发言）→ 断言会话列表里**没有**它；
+      发一条消息 → 断言列表里**有**它（test_empty_conversation_is_hidden）
+
+  - id: conversation_unread
+    entity: conversation
+    columns: [user1_unread, user2_unread]
+    desc: "每个参与者一个独立的未读计数（权威值）"
+    counter_transitions:
+      - {trigger: "对方发来一条消息", effect: "**接收方那一个** +1（发送方不变）", sql: "updateOnNewMessage 用 IF(userN_id = receiver, 1, 0)"}
+      - {trigger: "PUT /api/conversations/{id}/read", effect: "**当前用户那一个**清零（置 0，不是 -1）"}
+    invariants:
+      - "user1_unread + user2_unread >= 会话内未读消息总数（只在同事务更新，不会出现半更新）"
+      - "与 message.is_read 是**同一事实的两种表示**，必须同事务更新"
+    derived_api: "GET /api/messages/unread-count = SUM(当前用户那两个列)（ConversationMapper.sumUnread，COALESCE 保证无会话时为 0）"
+    seed_preconditions:
+      - "conversation id=1 (user 2↔3)：user3_unread = 2（最后两条未读）"
+      - "conversation id=4 (user 4↔6)：user1_unread = 3"
+    test_recipe: "先取 GET /api/messages/unread-count 的 total → 标记一个会话已读 → 断言 total 减少的恰是该会话的未读数（不是恒减 1）"
+
+  - id: message_is_read
+    entity: message
+    column: is_read
+    storage: "TINYINT NOT NULL DEFAULT 0"
+    states:
+      - {value: 0, name: UNREAD, kind: initial}
+      - {value: 1, name: READ, kind: terminal}
+    transitions:
+      - {from: 0, action: "PUT /api/conversations/{id}/read", to: 1, allowed: true,
+         expected: {code: 200}, effect: "同事务里把本会话中 receiver_id=当前用户 的全部未读置 1，并写 read_time"}
+      - {from: 1, action: "重复标记已读", to: 1, allowed: true, expected: {code: 200}, note: "幂等，SQL 带 is_read=0 条件，实际不更新"}
+      - {from: 1, action: "想改回未读", to: null, allowed: false, note: "🟢 **无此接口**"}
+    preconditions_for_reading: "requireMember：必须是会话参与者（否则 403），但**不要求互关**"
+    deletion: "message.deleted 列存在，但**没有任何撤回接口**（预留）→ deleted 恒为 0"
+
+  # ═══════════════════════════════════════════════════════════════
+  # 5. 通知已读
+  # ═══════════════════════════════════════════════════════════════
+  - id: notification_is_read
+    entity: notification
+    column: is_read
+    states:
+      - {value: 0, name: UNREAD, kind: initial}
+      - {value: 1, name: READ, kind: terminal}
+    transitions:
+      - {from: 0, action: "PUT /api/notifications/{id}/read", to: 1, allowed: true, expected: {code: 200}, rule: NOTI-002}
+      - {from: 0, action: "PUT /api/notifications/read-all", to: 1, allowed: true, expected: {code: 200}, rule: NOTI-003,
+         effect: "批量把**自己的**全部未读置 1（不影响他人）"}
+      - {from: 1, action: "重复标记", to: 1, allowed: true, expected: {code: 200},
+         note: "**幂等**：isRead 已为 1 时直接 return，不执行 UPDATE（NOTI-005）"}
+      - {from: 1, action: "想改回未读", to: null, allowed: false, note: "🟢 **无此接口**（NOTI-008）"}
+      - {from: 0, action: "标记**他人**的通知", to: null, allowed: false,
+         expected: {code: 403, error_code: FORBIDDEN}, rule: NOTI-001}
+    ownership: "notification.user_id 必须 == currentUserId；管理员也不能操作他人通知"
+    deletion: "通知只被**逻辑删除**（取消关注/点赞/删动态时），没有用户侧的删除接口"
+
+  # ═══════════════════════════════════════════════════════════════
+  # 6. 动态 / 评论生命周期
+  # ═══════════════════════════════════════════════════════════════
+  - id: post_lifecycle
+    entity: post
+    column: deleted
+    states:
+      - {value: 0, name: ACTIVE, kind: initial}
+      - {value: 1, name: DELETED, kind: terminal}
+    transitions:
+      - {from: 0, action: "DELETE /api/posts/{id}（作者或管理员）", to: 1, allowed: true, expected: {code: 200}, rule: POST-005}
+      - {from: 0, action: "DELETE（非作者且非管理员）", to: 0, allowed: false, expected: {code: 403, error_code: FORBIDDEN}, rule: POST-006}
+      - {from: 1, action: "DELETE（重复删除）", to: null, allowed: false, expected: {code: 404, error_code: POST_NOT_FOUND}}
+      - {from: 1, action: "想恢复/取消删除", to: null, allowed: false, note: "🟢 **无此接口**"}
+    cascade_on_transition: "见 rules/side_effects.yaml → DELETE_POSTS_ID（评论逻辑删、图片/点赞物理删、计数 -1、通知逻辑删）"
+    visibility: "deleted=1 后：详情/列表/点赞/评论 全部 404 POST_NOT_FOUND"
+
+  - id: comment_lifecycle
+    entity: comment
+    column: deleted
+    states:
+      - {value: 0, name: ACTIVE, kind: initial}
+      - {value: 1, name: DELETED, kind: terminal}
+    transitions:
+      - {from: 0, action: "DELETE /api/comments/{id}（作者或管理员）", to: 1, allowed: true, expected: {code: 200}, rule: CMT-002}
+      - {from: 0, action: "DELETE（非作者且非管理员）", to: 0, allowed: false, expected: {code: 403, error_code: FORBIDDEN}, rule: CMT-003}
+      - {from: 1, action: "重复删除", to: null, allowed: false, expected: {code: 404, error_code: COMMENT_NOT_FOUND}}
+      - {from: 1, action: "想恢复", to: null, allowed: false, note: "🟢 **无此接口**"}
+    passive_transition: "⚠️ **父动态被删时，其评论也被逻辑删除**（不是评论自己的接口触发的）"
+    reserved_columns:
+      - {column: parent_id, note: "预留多级评论，API 不暴露"}
+      - {column: reply_to_user_id, note: "预留，API 不暴露"}
+    forbidden_tests: "🔴 不要生成「楼中楼 / 回复评论 / 子评论」的用例（M-04）"
+
+  # ═══════════════════════════════════════════════════════════════
+  # 7. 派生状态：互关门槛（由两条 follow 行组合而成）
+  # ═══════════════════════════════════════════════════════════════
+  - id: mutual_follow_gate
+    desc: >-
+      **不是一个存储字段**，而是由 follow 表两行（A→B、B→A）派生的状态。
+      它决定私信/会话能否发起。这是本项目最特殊的一处"状态"。
+    derived_by: "FollowStatusLoader.isMutual(a, b) = 两个方向的 follow 行都存在"
+    states:
+      - {name: NONE, A_to_B: false, B_to_A: false, can_send: false, expected: {code: 403, error_code: NOT_MUTUAL_FOLLOW}}
+      - {name: ONE_WAY_A_TO_B, A_to_B: true, B_to_A: false, can_send: false, expected: {code: 403, error_code: NOT_MUTUAL_FOLLOW}}
+      - {name: ONE_WAY_B_TO_A, A_to_B: false, B_to_A: true, can_send: false, expected: {code: 403, error_code: NOT_MUTUAL_FOLLOW}}
+      - {name: MUTUAL, A_to_B: true, B_to_A: true, can_send: true, expected: {code: 200}}
+    transitions:
+      - {from: NONE, action: "A 关注 B", to: ONE_WAY_A_TO_B, allowed: true, can_send: false}
+      - {from: ONE_WAY_A_TO_B, action: "B 关注 A", to: MUTUAL, allowed: true, can_send: true,
+         note: "✅ 这是「建立可私聊关系」的唯一路径"}
+      - {from: MUTUAL, action: "A 取消关注 B", to: ONE_WAY_B_TO_A, allowed: true, can_send: false,
+         note: "解除后**不能**再发消息，但**历史消息仍可读**、**仍可标记已读**"}
+      - {from: ONE_WAY_B_TO_A, action: "A 重新关注 B", to: MUTUAL, allowed: true, can_send: true,
+         note: "✅ 可恢复发送能力（test_sending_is_restored_after_refollow）"}
+    gate_scope:
+      gated: [POST_MESSAGES, POST_CONVERSATIONS]
+      not_gated: [GET_CONVERSATIONS, GET_CONVERSATIONS_ID_MESSAGES, PUT_CONVERSATIONS_ID_READ, GET_MESSAGES_UNREAD_COUNT]
+      design_intent: "限制的是「发起」，不是「查看」（2026-09-11 冻结）"
+    seed_preconditions:
+      - "user 2 ↔ 3 已是 MUTUAL → 可只读验证，但**发消息会污染种子会话**"
+      - "user 14~21 → user 2/3/4 是单向 → 可只读验证 NOT_MUTUAL_FOLLOW"
+      - "conversation id=4 (4↔6) 与 id=5 (5↔7) 是**非互关的历史会话** → 可读不可发（现成的负向样本）"
+    test_recipe: >-
+      ⚠️ 任何"能发消息"的用例都必须**自建互关对**（fresh_users(2) + 双向关注），
+      不要用种子 2↔3，否则会改掉 conversation 1 的 last_message 与未读数，破坏一堆绝对值断言。
+
+# ═══════════════════════════════════════════════════════════════
+# 枚举字典（供 Pydantic / Validator 校验取值合法性）
+# ═══════════════════════════════════════════════════════════════
+enums:
+  - {name: RoleEnum, column: "user.role", values: {"1": USER, "2": ADMIN}, note: "只有两个角色"}
+  - {name: UserStatusEnum, column: "user.status", values: {"0": DISABLED, "1": NORMAL}}
+  - {name: GenderEnum, column: "user.gender", values: {"0": UNKNOWN, "1": MALE, "2": FEMALE}}
+  - {name: ReportStatusEnum, column: "report.status", values: {"0": PENDING, "1": HANDLED, "2": REJECTED}}
+  - {name: ReportReasonEnum, column: "report.reason_type", values: {"1": SPAM, "2": ABUSE, "3": PORNOGRAPHY, "4": ILLEGAL, "5": OTHER}}
+  - {name: ReportActionEnum, column: "（不落库，请求体 action 字符串）", values: [NONE, DELETE_POST, DELETE_COMMENT, DISABLE_USER], note: "大小写不敏感（equalsIgnoreCase）"}
+  - {name: TargetTypeEnum, column: "report.target_type / admin_operation_log.target_type",
+     values: {"1": USER, "2": POST, "3": COMMENT, "4": REPORT},
+     note: "⚠️ 同一张枚举两处用法不同：举报接口只接受 1~3（@Max(3)），管理日志的 target_type 可为 4"}
+  - {name: NotificationTypeEnum, column: "notification.type",
+     values: {"1": FOLLOW, "2": LIKE, "3": COMMENT, "4": MESSAGE},
+     note: "⚠️ 4(MESSAGE) 是 @Deprecated 保留值，isValid() 排除它，**一期不产生**"}
+
+# ═══════════════════════════════════════════════════════════════
+# 非法/不可达转换总表（一张表看完"不要生成什么"）
+# ═══════════════════════════════════════════════════════════════
+unreachable_transitions:
+  desc: 生成状态用例前的**否决清单**。命中任意一条就不要生成。
+  items:
+    - {transition: "举报 1/2 → 0（回退到待处理）", why: "DTO @Min(1)@Max(2) 排除了 0", rule: RPT-007}
+    - {transition: "通知 1 → 0（改回未读）", why: "无此接口", rule: NOTI-008}
+    - {transition: "消息 1 → 0（改回未读）", why: "无此接口"}
+    - {transition: "动态/评论 deleted 1 → 0（恢复）", why: "无此接口"}
+    - {transition: "user.deleted 1 → 0（恢复账号）", why: "无此接口"}
+    - {transition: "user.status：管理员禁用另一个管理员", why: "种子只有 1 个管理员，CANNOT_OPERATE_SELF 先命中", related_issue: M-01, registered: SEC-004}
+    - {transition: "会话删除 / 消息撤回", why: "无此接口（message.deleted 是预留列）"}
+    - {transition: "给已有动态追加图片", why: "只有发布时一次性提交（无单图接口）"}
+    - {transition: "楼中楼 / 回复评论", why: "parent_id 是预留列，API 不暴露", related_issue: M-04}
+    - {transition: "发私信产生 notification(type=4)", why: "MESSAGE 类型已废弃，一期不产生", rule: NOTI-007}
+
+# ═══════════════════════════════════════════════════════════════
+# AI 使用检查点
+# ═══════════════════════════════════════════════════════════════
+ai_checklist:
+  - "生成任何状态迁移用例前，先查本文件有没有对应 machine —— 没有就说明该状态不可变，不要臆造接口"
+  - "report.status 是唯一有完整转换表的状态机，其它状态多为单向"
+  - "user.status 是唯一可逆的账号维度；deleted 不可逆"
+  - "关系类（follow / post_like）用**物理删除**实现可逆 —— 可以测「取消后重建」"
+  - "互关门槛是派生状态，用例必须先建 follow 关系，不能直接设"
+  - "要构造「举报已处理」「消息已读」「通知已读」等前置状态，**优先用种子数据**，其次用一次 API 调用达到目标状态，**不要直接改库**（除 deleted 这种没有接口的）"
+  - "先扫一遍 unreachable_transitions，命中就换设计"
